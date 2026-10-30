@@ -23,30 +23,33 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Clean & Prepare Project Files
+      - name: Create Clean Environment & Copy Files
         run: |
-          if [ -f "main.dart" ] && [ ! -f "lib/main.dart" ]; then
-            mkdir -p lib
-            mv main.dart lib/main.dart
-          fi
+          # إنشاء مشروع فلاتر جديد ونظيف في مجلد منفصل
+          flutter create --project-name surgical_elogbook --org com.surgeon.elogbook app_workspace
           
-          if [ -d "lib" ]; then
-            cp -r lib lib_bak
+          # البحث عن ملف الكود الخاص بك ونسخه بأمان
+          if [ -f "main.dart" ]; then
+            cp main.dart app_workspace/lib/main.dart
+          elif [ -f "lib/main.dart" ]; then
+            cp lib/main.dart app_workspace/lib/main.dart
           else
-            mkdir lib_bak
+            echo "Error: main.dart not found anywhere!"
+            exit 1
           fi
           
-          rm -rf android ios linux macos web windows test pubspec.lock
-          flutter create --project-name surgical_elogbook --org com.surgeon.elogbook .
-          
-          rm -rf test lib
-          mv lib_bak lib
+          # نسخ ملف الإعدادات
+          if [ -f "pubspec.yaml" ]; then
+            cp pubspec.yaml app_workspace/pubspec.yaml
+          fi
 
       - name: Build Release APK
-        run: flutter build apk --release
+        run: |
+          cd app_workspace
+          flutter build apk --release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Surgical-eLogbook-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: app_workspace/build/app/outputs/flutter-apk/app-release.apk
