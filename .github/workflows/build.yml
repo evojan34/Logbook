@@ -23,7 +23,7 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Clean & Prepare Project Files
+      - name: Clean and Prepare Project Files
         run: |
           if [ -f "main.dart" ] && [ ! -f "lib/main.dart" ]; then
             mkdir -p lib
@@ -31,9 +31,9 @@ jobs:
           fi
           sed -i '/\/\/ === END_OF_FILE ===/q' lib/main.dart
           cp -r lib lib_bak
-          rm -rf android ios linux macos web windows test pubspec.lock
+          rm -rf android ios linux macos web windows test pubspec.lock analysis_options.yaml
           flutter create --project-name surgical_elogbook --org com.surgeon.elogbook .
-          rm -rf test lib
+          rm -rf test lib analysis_options.yaml
           mv lib_bak lib
 
       - name: Verify Dart Syntax
