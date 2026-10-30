@@ -1,15 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:sqflite/sqflite.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:intl/intl.dart';
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:printing/printing.dart';
-import 'package:share_plus/share_plus.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,6 +15,22 @@ const Color kGoldSubtle = Color(0x26D4AF37);
 const Color kDarkBg = Color(0xFF121212);
 const Color kCardBg = Color(0xFF1E1E1E);
 
+String formatDate(DateTime d) {
+  final y = d.year.toString().padLeft(4, '0');
+  final m = d.month.toString().padLeft(2, '0');
+  final day = d.day.toString().padLeft(2, '0');
+  return '$y-$m-$day';
+}
+
+String formatStamp(DateTime d) {
+  final y = d.year.toString().padLeft(4, '0');
+  final m = d.month.toString().padLeft(2, '0');
+  final day = d.day.toString().padLeft(2, '0');
+  final h = d.hour.toString().padLeft(2, '0');
+  final min = d.minute.toString().padLeft(2, '0');
+  return '$y$m${day}_$h$min';
+}
+
 class SurgicalLogbookApp extends StatelessWidget {
   const SurgicalLogbookApp({super.key});
 
@@ -30,7 +39,8 @@ class SurgicalLogbookApp extends StatelessWidget {
     return MaterialApp(
       title: 'Surgical e-Logbook',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
+      theme: ThemeData(
+        brightness: Brightness.dark,
         scaffoldBackgroundColor: kDarkBg,
         primaryColor: kGoldColor,
         colorScheme: const ColorScheme.dark(
@@ -54,94 +64,259 @@ class SurgicalLogbookApp extends StatelessWidget {
   }
 }
 
-// --- Database Helper ---
+// --- Pure Dart Persistent Local Database (Zero Native Plugin Risk) ---
 class LogbookDatabase {
   static final LogbookDatabase instance = LogbookDatabase._init();
-  static Database? _database;
   LogbookDatabase._init();
 
-  Future<Database> get database async {
-    if (_database != null) return _database!;
-    final dbPath = await getDatabasesPath();
-    final path = p.join(dbPath, 'surgical_elogbook_v2.db');
-    _database = await openDatabase(
-      path,
-      version: 1,
-      onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE operations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date TEXT NOT NULL,
-            patientId TEXT NOT NULL,
-            age INTEGER NOT NULL,
-            sex TEXT NOT NULL,
-            hospital TEXT NOT NULL,
-            consultant TEXT NOT NULL,
-            category TEXT NOT NULL,
-            procedureName TEXT NOT NULL,
-            urgency TEXT NOT NULL,
-            role TEXT NOT NULL,
-            complications TEXT NOT NULL,
-            notes TEXT
-          )
-        ''');
-        await db.execute('''
-          CREATE TABLE settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-          )
-        ''');
-      },
-    );
-    return _database!;
+  Map<String, dynamic>? _cache;
+
+  Future<Directory> getStorageDir() async {
+    try {
+      final baseDir = Directory('${Directory.systemTemp.parent.path}/files');
+      if (!await baseDir.exists()) {
+        await baseDir.create(recursive: true);
+      }
+      return baseDir;
+    } catch (_) {
+      return Directory.systemTemp;
+    }
+  }
+
+  Future<File> _getDbFile() async {
+    final dir = await getStorageDir();
+    return File('${dir.path}/surgical_elogbook_v2.json');
+  }
+
+  Future> _loadDb() async {
+    if (_cache != null) return _cache!;
+    try {
+      final file = await _getDbFile();
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        final decoded = jsonDecode(content);
+        if (decoded is Map<String, dynamic>) {
+          _cache = decoded;
+          _cache!['operations'] ??= <dynamic>[];
+          _cache!['settings'] ??= <String, dynamic>{};
+          return _cache!;
+        }
+      }
+    } catch (_) {}
+    _cache = {
+      'nextId': 1,
+      'operations': <dynamic>[],
+      'settings': <String, dynamic>{},
+    };
+    return _cache!;
+  }
+
+  Future<void> _saveDb() async {
+    if (_cache == null) return;
+    final file = await _getDbFile();
+    await file.writeAsString(jsonEncode(_cache));
   }
 
   Future<int> insertCase(Map<String, dynamic> row) async {
-    final db = await instance.database;
-    final cleanRow = Map<String, dynamic>.from(row)..remove('id');
-    return await db.insert('operations', cleanRow);
+    final db = await _loadDb();
+    final int nextId = (db['nextId'] as int? ?? 1);
+    final newRow = Map<String, dynamic>.from(row);
+    newRow['id'] = nextId;
+    (db['operations'] as List).add(newRow);
+    db['nextId'] = nextId + 1;
+    await _saveDb();
+    return nextId;
   }
 
-  Future<int> updateCase(int id, Map<String, dynamic> row) async {
-    final db = await instance.database;
-    final cleanRow = Map<String, dynamic>.from(row)..remove('id');
-    return await db.update(
-      'operations',
-      cleanRow,
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+  Future<void> updateCase(int id, Map<String, dynamic> row) async {
+    final db = await _loadDb();
+    final List ops = db['operations'] as List;
+    for (int i = 0; i < ops.length; i++) {
+      final item = Map<String, dynamic>.from(ops[i] as Map);
+      if (item['id'] == id) {
+        final updated = Map<String, dynamic>.from(row);
+        updated['id'] = id;
+        ops[i] = updated;
+        break;
+      }
+    }
+    await _saveDb();
   }
 
   Future<List>> fetchAllCases() async {
-    final db = await instance.database;
-    return await db.query('operations', orderBy: 'date DESC, id DESC');
+    final db = await _loadDb();
+    final List ops = db['operations'] as List;
+    final List> result =
+        ops.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    result.sort((a, b) {
+      final c = (b['date']?.toString() ?? '').compareTo(a['date']?.toString() ?? '');
+      if (c != 0) return c;
+      return (b['id'] as int? ?? 0).compareTo(a['id'] as int? ?? 0);
+    });
+    return result;
   }
 
-  Future<int> deleteCase(int id) async {
-    final db = await instance.database;
-    return await db.delete('operations', where: 'id = ?', whereArgs: [id]);
+  Future<void> deleteCase(int id) async {
+    final db = await _loadDb();
+    final List ops = db['operations'] as List;
+    ops.removeWhere((e) => (e as Map)['id'] == id);
+    await _saveDb();
   }
 
   Future<void> saveSetting(String key, String value) async {
-    final db = await instance.database;
-    await db.insert(
-      'settings',
-      {'key': key, 'value': value},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    final db = await _loadDb();
+    final Map<String, dynamic> settings =
+        Map<String, dynamic>.from(db['settings'] as Map);
+    settings[key] = value;
+    db['settings'] = settings;
+    await _saveDb();
   }
 
   Future> loadSettings() async {
-    final db = await instance.database;
-    final rows = await db.query('settings');
-    final Map<String, String> map = {};
-    for (final r in rows) {
-      final k = r['key']?.toString() ?? '';
-      final v = r['value']?.toString() ?? '';
-      if (k.isNotEmpty) map[k] = v;
+    final db = await _loadDb();
+    final Map s = db['settings'] as Map;
+    final Map<String, String> result = {};
+    for (final entry in s.entries) {
+      result[entry.key.toString()] = entry.value.toString();
     }
-    return map;
+    return result;
+  }
+}
+
+// --- Pure Dart PDF 1.4 File Builder ---
+class PurePdfGenerator {
+  static String _cleanAscii(String input) {
+    final ascii = input.replaceAll(RegExp(r'[^\x20-\x7E]'), '');
+    return ascii
+        .replaceAll('\\', '\\\\')
+        .replaceAll('(', '\\(')
+        .replaceAll(')', '\\)');
+  }
+
+  static Uint8List generateReportPdf({
+    required String traineeName,
+    required String traineeGrade,
+    required String hospital,
+    required String consultant,
+    required String periodText,
+    required Map<String, Map<String, int>> summary,
+    required List> cases,
+  }) {
+    final List<String> lines = [];
+    lines.add('PAN-SURGICAL ELECTRONIC LOGBOOK - CONSOLIDATION REPORT');
+    lines.add('Surgeon / Trainee: $traineeName ($traineeGrade)');
+    lines.add('Institution: $hospital   |   Supervisor: $consultant');
+    lines.add('Period: $periodText   |   Printed: ${formatDate(DateTime.now())}');
+    lines.add('=' * 85);
+    lines.add('1. PROCEDURE CONSOLIDATION SUMMARY');
+    lines.add('-' * 85);
+    lines.add(
+        '${"Procedure Name".padRight(42)} ${"P".padLeft(5)} ${"S-TS".padLeft(6)} ${"S-TU".padLeft(6)} ${"A".padLeft(5)} ${"T".padLeft(5)} ${"Total".padLeft(7)}');
+    lines.add('-' * 85);
+
+    for (final entry in summary.entries) {
+      final name = entry.key.length > 40
+          ? entry.key.substring(0, 40)
+          : entry.key.padRight(42);
+      final v = entry.value;
+      lines.add(
+          '$name ${(v['P'] ?? 0).toString().padLeft(5)} ${(v['S-TS'] ?? 0).toString().padLeft(6)} ${(v['S-TU'] ?? 0).toString().padLeft(6)} ${(v['A'] ?? 0).toString().padLeft(5)} ${(v['T'] ?? 0).toString().padLeft(5)} ${(v['Total'] ?? 0).toString().padLeft(7)}');
+    }
+
+    int countRole(String r) => cases.where((c) => c['role'] == r).length;
+    lines.add('-' * 85);
+    lines.add(
+        'TOTAL CASES: ${cases.length}  |  P: ${countRole("P")}  |  S-TS: ${countRole("S-TS")}  |  S-TU: ${countRole("S-TU")}  |  A: ${countRole("A")}  |  T: ${countRole("T")}');
+    lines.add('=' * 85);
+    lines.add('');
+    lines.add('2. DETAILED OPERATIVE LOGBOOK RECORD');
+    lines.add('-' * 85);
+    lines.add(
+        '${"Date".padRight(11)} ${"Pt ID".padRight(10)} ${"Age/S".padRight(7)} ${"Procedure".padRight(32)} ${"CEPOD".padRight(10)} ${"Role".padRight(6)}');
+    lines.add('-' * 85);
+
+    for (final c in cases) {
+      final date = (c['date']?.toString() ?? '').padRight(11);
+      final pt = (c['patientId']?.toString() ?? '');
+      final ptPad = (pt.length > 9 ? pt.substring(0, 9) : pt).padRight(10);
+      final ageSex = '${c['age']}/${c['sex']}'.padRight(7);
+      final proc = (c['procedureName']?.toString() ?? '');
+      final procPad =
+          (proc.length > 30 ? proc.substring(0, 30) : proc).padRight(32);
+      final urg = (c['urgency']?.toString() ?? '');
+      final urgPad = (urg.length > 9 ? urg.substring(0, 9) : urg).padRight(10);
+      final role = (c['role']?.toString() ?? '').padRight(6);
+      lines.add('$date $ptPad $ageSex $procPad $urgPad $role');
+    }
+
+    lines.add('');
+    lines.add('-' * 85);
+    lines.add(
+        'Trainee Signature: ___________________    Consultant Signature: ___________________');
+
+    // Split into pages of 52 lines
+    const int linesPerPage = 52;
+    final List<List<String>> pages = [];
+    for (int i = 0; i < lines.length; i += linesPerPage) {
+      final end =
+          (i + linesPerPage < lines.length) ? i + linesPerPage : lines.length;
+      pages.add(lines.sublist(i, end));
+    }
+    if (pages.isEmpty) pages.add(['Empty Logbook']);
+
+    final List<String> objects = [];
+    // Obj 1: Catalog, Obj 2: Pages, Obj 3: Font Courier
+    objects.add('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+
+    final List<String> pageRefs = [];
+    for (int i = 0; i < pages.length; i++) {
+      final pageObjNum = 4 + (i * 2);
+      pageRefs.add('$pageObjNum 0 R');
+    }
+    objects.add(
+        '2 0 obj\n<< /Type /Pages /Kids [${pageRefs.join(' ')}] /Count ${pages.length} >>\nendobj\n');
+    objects.add(
+        '3 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n');
+
+    for (int i = 0; i < pages.length; i++) {
+      final pageObjNum = 4 + (i * 2);
+      final contentObjNum = pageObjNum + 1;
+
+      final sb = StringBuffer();
+      sb.writeln('BT');
+      sb.writeln('/F1 8.5 Tf');
+      int y = 800;
+      for (final line in pages[i]) {
+        final safe = _cleanAscii(line);
+        sb.writeln('1 0 0 1 30 $y Tm ($safe) Tj');
+        y -= 14;
+      }
+      sb.writeln('ET');
+      final streamContent = sb.toString();
+
+      objects.add(
+          '$pageObjNum 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents $contentObjNum 0 R >>\nendobj\n');
+      objects.add(
+          '$contentObjNum 0 obj\n<< /Length ${streamContent.length} >>\nstream\n$streamContent\nendstream\nendobj\n');
+    }
+
+    final pdfBuffer = StringBuffer();
+    pdfBuffer.write('%PDF-1.4\n');
+    final List<int> offsets = [];
+    for (final obj in objects) {
+      offsets.add(pdfBuffer.toString().length);
+      pdfBuffer.write(obj);
+    }
+    final xrefOffset = pdfBuffer.toString().length;
+    pdfBuffer.write('xref\n0 ${objects.length + 1}\n');
+    pdfBuffer.write('0000000000 65535 f \n');
+    for (final offset in offsets) {
+      pdfBuffer.write('${offset.toString().padLeft(10, '0')} 00000 n \n');
+    }
+    pdfBuffer.write(
+        'trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n$xrefOffset\n%%EOF\n');
+
+    return Uint8List.fromList(utf8.encode(pdfBuffer.toString()));
   }
 }
 
@@ -211,7 +386,7 @@ class LogbookHomeScreen extends StatefulWidget {
 }
 
 class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
-  int _currentTabIndex = 0; // 0 = Operations Log, 1 = Analytics Dashboard
+  int _currentTabIndex = 0;
   List> _cases = [];
   String _selectedRoleFilter = 'ALL';
   String _searchQuery = '';
@@ -242,7 +417,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
       _traineeGrade = settings['traineeGrade'] ?? 'General Surgery Resident';
       _defaultHospital = settings['defaultHospital'] ?? 'Teaching Hospital';
       _defaultConsultant = settings['defaultConsultant'] ?? 'Consultant Surgeon';
-      _targetCasesGoal = int.tryParse(settings['targetCasesGoal'] ?? '200') ?? 200;
+      _targetCasesGoal =
+          int.tryParse(settings['targetCasesGoal'] ?? '200') ?? 200;
       _pinCode = savedPin;
       if (checkPinOnStart && savedPin.isNotEmpty) {
         _isLocked = true;
@@ -262,9 +438,11 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     return true;
   }
 
-  List> _getCasesForRange(String? fromDate, String? toDate) {
+  List> _getCasesForRange(
+      String? fromDate, String? toDate) {
     return _cases
-        .where((c) => _isDateInRange(c['date']?.toString() ?? '', fromDate, toDate))
+        .where(
+            (c) => _isDateInRange(c['date']?.toString() ?? '', fromDate, toDate))
         .toList();
   }
 
@@ -296,7 +474,21 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- Reusable Custom Dropdown Builder (Compatible with all Flutter versions) ---
+  Future<String> _saveExportFile(String fileName, Uint8List bytes) async {
+    try {
+      final downloadDir = Directory('/storage/emulated/0/Download');
+      if (await downloadDir.exists()) {
+        final f = File('${downloadDir.path}/$fileName');
+        await f.writeAsBytes(bytes);
+        return f.path;
+      }
+    } catch (_) {}
+    final localDir = await LogbookDatabase.instance.getStorageDir();
+    final f = File('${localDir.path}/$fileName');
+    await f.writeAsBytes(bytes);
+    return f.path;
+  }
+
   Widget _buildDropdown({
     required String label,
     required String value,
@@ -331,24 +523,23 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     void applyPreset(
         String preset, void Function(void Function()) setDialogState) {
       final now = DateTime.now();
-      final fmt = DateFormat('yyyy-MM-dd');
       setDialogState(() {
         activePreset = preset;
         if (preset == 'all') {
           tempFrom = null;
           tempTo = null;
         } else if (preset == 'month') {
-          tempFrom = fmt.format(DateTime(now.year, now.month, 1));
-          tempTo = fmt.format(now);
+          tempFrom = formatDate(DateTime(now.year, now.month, 1));
+          tempTo = formatDate(now);
         } else if (preset == '3months') {
-          tempFrom = fmt.format(DateTime(now.year, now.month - 3, now.day));
-          tempTo = fmt.format(now);
+          tempFrom = formatDate(DateTime(now.year, now.month - 3, now.day));
+          tempTo = formatDate(now);
         } else if (preset == '6months') {
-          tempFrom = fmt.format(DateTime(now.year, now.month - 6, now.day));
-          tempTo = fmt.format(now);
+          tempFrom = formatDate(DateTime(now.year, now.month - 6, now.day));
+          tempTo = formatDate(now);
         } else if (preset == 'year') {
-          tempFrom = fmt.format(DateTime(now.year, 1, 1));
-          tempTo = fmt.format(now);
+          tempFrom = formatDate(DateTime(now.year, 1, 1));
+          tempTo = formatDate(now);
         }
       });
     }
@@ -418,8 +609,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                             if (picked != null) {
                               setDialogState(() {
                                 activePreset = 'custom';
-                                tempFrom =
-                                    DateFormat('yyyy-MM-dd').format(picked);
+                                tempFrom = formatDate(picked);
                               });
                             }
                           },
@@ -452,8 +642,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                             if (picked != null) {
                               setDialogState(() {
                                 activePreset = 'custom';
-                                tempTo =
-                                    DateFormat('yyyy-MM-dd').format(picked);
+                                tempTo = formatDate(picked);
                               });
                             }
                           },
@@ -513,7 +702,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                             _screenEndDate = tempTo;
                           });
                         } else if (mode == 'pdf') {
-                          _exportConsolidationPdf(
+                          _openConsolidationReportScreen(
                               fromDate: tempFrom, toDate: tempTo);
                         } else if (mode == 'csv') {
                           _exportCsv(fromDate: tempFrom, toDate: tempTo);
@@ -521,7 +710,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                       },
                 child: Text(
                   mode == 'pdf'
-                      ? 'توليد PDF'
+                      ? 'فتح ومعاينة PDF'
                       : mode == 'csv'
                           ? 'تصدير CSV'
                           : 'تطبيق الفلتر',
@@ -550,7 +739,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 1. JSON Backup Export (Saves Locally + Copies to Clipboard + Shares File) ---
+  // --- 1. JSON Backup Export ---
   Future<void> _exportJsonBackup() async {
     try {
       final settings = await LogbookDatabase.instance.loadSettings();
@@ -561,33 +750,29 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         'operations': _cases,
       };
       final jsonString = const JsonEncoder.withIndent('  ').convert(backupData);
-
-      // Copy to clipboard automatically as a fallback
       await Clipboard.setData(ClipboardData(text: jsonString));
 
-      // Save to app documents directory & share
-      final docDir = await getApplicationDocumentsDirectory();
-      final dateStr = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
-      final localFile = File('${docDir.path}/elogbook_backup_$dateStr.json');
-      await localFile.writeAsString(jsonString);
-
-      await Share.shareXFiles(
-        [XFile(localFile.path)],
-        text: 'Surgical e-Logbook Backup ($dateStr)',
+      final stamp = formatStamp(DateTime.now());
+      final savedPath = await _saveExportFile(
+        'elogbook_backup_$stamp.json',
+        Uint8List.fromList(utf8.encode(jsonString)),
       );
+      _showSnack('تم حفظ النسخة الاحتياطية ونسخها للحافظة:\n$savedPath');
     } catch (e) {
-      _showSnack('تم نسخ النسخة الاحتياطية للحافظة: $e');
+      _showSnack('تم نسخ النسخة الاحتياطية للحافظة');
     }
   }
 
-  // --- 2. JSON Backup Restore Dialog (From Local Backups or Clipboard/Text) ---
+  // --- 2. JSON Backup Restore Dialog ---
   Future<void> _showRestoreBackupDialog() async {
     final textCtrl = TextEditingController();
-    final docDir = await getApplicationDocumentsDirectory();
-    final List<File> localBackups = docDir
+    final storageDir = await LogbookDatabase.instance.getStorageDir();
+    final List<File> localBackups = storageDir
         .listSync()
         .whereType<File>()
-        .where((f) => f.path.endsWith('.json'))
+        .where((f) =>
+            f.path.endsWith('.json') &&
+            !f.path.endsWith('surgical_elogbook_v2.json'))
         .toList();
 
     if (!mounted) return;
@@ -619,7 +804,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                           leading: const Icon(Icons.restore_page,
                               color: kGoldColor),
                           title: Text(
-                            p.basename(file.path),
+                            file.path.split('/').last,
                             style: const TextStyle(fontSize: 12),
                           ),
                           onTap: () async {
@@ -711,14 +896,14 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
           if (!isDuplicate) {
             await LogbookDatabase.instance.insertCase({
-              'date': map['date']?.toString() ??
-                  DateFormat('yyyy-MM-dd').format(DateTime.now()),
+              'date': map['date']?.toString() ?? formatDate(DateTime.now()),
               'patientId': map['patientId']?.toString() ?? 'Unknown',
               'age': int.tryParse(map['age']?.toString() ?? '0') ?? 0,
               'sex': map['sex']?.toString() ?? 'M',
               'hospital': map['hospital']?.toString() ?? _defaultHospital,
               'consultant': map['consultant']?.toString() ?? _defaultConsultant,
-              'category': map['category']?.toString() ?? 'Appendix & Diagnostic',
+              'category':
+                  map['category']?.toString() ?? 'Appendix & Diagnostic',
               'procedureName': map['procedureName']?.toString() ?? 'Operation',
               'urgency': map['urgency']?.toString() ?? 'Elective',
               'role': map['role']?.toString() ?? 'P',
@@ -767,35 +952,34 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         ].join(','));
       }
 
-      final dir = await getTemporaryDirectory();
+      final csvText = buffer.toString();
+      await Clipboard.setData(ClipboardData(text: csvText));
+
       final rangeTag = (fromDate != null || toDate != null)
           ? '${fromDate ?? "Start"}_to_${toDate ?? "Now"}'
-          : DateFormat('yyyyMMdd').format(DateTime.now());
-      final file = File('${dir.path}/surgical_logbook_$rangeTag.csv');
-      await file.writeAsString(buffer.toString());
-
-      await Share.shareXFiles(
-        [XFile(file.path)],
-        text: 'Surgical e-Logbook CSV ($rangeTag)',
+          : formatDate(DateTime.now());
+      final savedPath = await _saveExportFile(
+        'surgical_logbook_$rangeTag.csv',
+        Uint8List.fromList(utf8.encode(csvText)),
       );
+
+      _showSnack('تم حفظ ملف الإكسل CSV ونسخه للحافظة:\n$savedPath');
     } catch (e) {
       _showSnack('Error exporting CSV: $e');
     }
   }
 
-  // --- 4. PDF Consolidation Report ---
-  Future<void> _exportConsolidationPdf(
-      {String? fromDate, String? toDate}) async {
+  // --- 4. Open Consolidation Report Preview & PDF Export Screen ---
+  void _openConsolidationReportScreen({String? fromDate, String? toDate}) {
     final targetCases = _getCasesForRange(fromDate, toDate);
     if (targetCases.isEmpty) {
       _showSnack('لا توجد عمليات مسجلة في هذه الفترة');
       return;
     }
 
-    final pdf = pw.Document();
     final periodText = (fromDate == null && toDate == null)
         ? 'All Recorded Operations (Complete Logbook)'
-        : 'From: ${fromDate ?? "Beginning"}   To: ${toDate ?? DateFormat('yyyy-MM-dd').format(DateTime.now())}';
+        : 'From: ${fromDate ?? "Beginning"}   To: ${toDate ?? formatDate(DateTime.now())}';
 
     final Map<String, Map<String, int>> summary = {};
     for (final c in targetCases) {
@@ -807,135 +991,24 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
       summary[proc]!['Total'] = (summary[proc]!['Total'] ?? 0) + 1;
     }
 
-    int countRoleInTarget(String r) =>
-        targetCases.where((c) => c['role'] == r).length;
-
-    pdf.addPage(
-      pw.MultiPage(
-        pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(28),
-        build: (context) => [
-          pw.Header(
-            level: 0,
-            child: pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              crossAxisAlignment: pw.CrossAxisAlignment.start,
-              children: [
-                pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Text('PAN-SURGICAL ELECTRONIC LOGBOOK',
-                        style: pw.TextStyle(
-                            fontSize: 15, fontWeight: pw.FontWeight.bold)),
-                    pw.SizedBox(height: 4),
-                    pw.Text('Surgeon / Trainee: $_traineeName ($_traineeGrade)',
-                        style: const pw.TextStyle(fontSize: 11)),
-                    pw.Text('Primary Institution: $_defaultHospital',
-                        style: const pw.TextStyle(fontSize: 10)),
-                    pw.SizedBox(height: 3),
-                    pw.Text('Logbook Period: $periodText',
-                        style: pw.TextStyle(
-                            fontSize: 10, fontWeight: pw.FontWeight.bold)),
-                  ],
-                ),
-                pw.Text(
-                    'Printed: ${DateFormat('yyyy-MM-dd').format(DateTime.now())}',
-                    style: const pw.TextStyle(fontSize: 10)),
-              ],
-            ),
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ConsolidationReportScreen(
+          traineeName: _traineeName,
+          traineeGrade: _traineeGrade,
+          hospital: _defaultHospital,
+          consultant: _defaultConsultant,
+          periodText: periodText,
+          summary: summary,
+          cases: targetCases,
+          onSavePdf: (bytes) => _saveExportFile(
+            'Surgical_Logbook_${formatStamp(DateTime.now())}.pdf',
+            bytes,
           ),
-          pw.SizedBox(height: 10),
-          pw.Text('1. Procedure Consolidation Summary',
-              style:
-                  pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 8),
-          pw.TableHelper.fromTextArray(
-            headers: ['Procedure Name', 'P', 'S-TS', 'S-TU', 'A', 'T', 'Total'],
-            data: summary.entries
-                .map((e) => [
-                      e.key,
-                      e.value['P'].toString(),
-                      e.value['S-TS'].toString(),
-                      e.value['S-TU'].toString(),
-                      e.value['A'].toString(),
-                      e.value['T'].toString(),
-                      e.value['Total'].toString(),
-                    ])
-                .toList(),
-            headerStyle:
-                pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10),
-            cellStyle: const pw.TextStyle(fontSize: 9),
-            cellAlignment: pw.Alignment.center,
-          ),
-          pw.SizedBox(height: 14),
-          pw.Container(
-            padding: const pw.EdgeInsets.all(8),
-            decoration: pw.BoxDecoration(border: pw.Border.all()),
-            child: pw.Text(
-              'Period Total: ${targetCases.length}   |   Performed (P): ${countRoleInTarget('P')}   |   Supervised (S-TS / S-TU): ${countRoleInTarget('S-TS') + countRoleInTarget('S-TU')}   |   Assisted (A): ${countRoleInTarget('A')}   |   Training (T): ${countRoleInTarget('T')}',
-              style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
-            ),
-          ),
-          pw.SizedBox(height: 20),
-          pw.Text('2. Detailed Operative Logbook Record',
-              style:
-                  pw.TextStyle(fontSize: 13, fontWeight: pw.FontWeight.bold)),
-          pw.SizedBox(height: 8),
-          pw.TableHelper.fromTextArray(
-            headers: [
-              'Date',
-              'Pt ID',
-              'Age/Sex',
-              'Procedure',
-              'CEPOD',
-              'Role',
-              'Consultant',
-              'Complications'
-            ],
-            data: targetCases
-                .map((c) => [
-                      c['date']?.toString() ?? '',
-                      c['patientId']?.toString() ?? '',
-                      '${c['age']}/${c['sex']}',
-                      c['procedureName']?.toString() ?? '',
-                      c['urgency']?.toString() ?? '',
-                      c['role']?.toString() ?? '',
-                      c['consultant']?.toString() ?? '',
-                      c['complications']?.toString() ?? '',
-                    ])
-                .toList(),
-            headerStyle:
-                pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold),
-            cellStyle: const pw.TextStyle(fontSize: 8),
-          ),
-          pw.SizedBox(height: 40),
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text('Trainee Signature: ______________________'),
-                  pw.SizedBox(height: 4),
-                  pw.Text(_traineeName, style: const pw.TextStyle(fontSize: 9)),
-                ],
-              ),
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Text('Consultant Signature: ______________________'),
-                  pw.SizedBox(height: 4),
-                  pw.Text(_defaultConsultant,
-                      style: const pw.TextStyle(fontSize: 9)),
-                ],
-              ),
-            ],
-          ),
-        ],
+        ),
       ),
     );
-
-    await Printing.layoutPdf(onLayout: (format) async => pdf.save());
   }
 
   // --- 5. Profile, Target Goal & PIN Settings Dialog ---
@@ -985,7 +1058,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                 controller: goalCtrl,
                 keyboardType: TextInputType.number,
                 decoration: const InputDecoration(
-                    labelText: 'Target Operations Goal (الهدف التدريبي للعمليات)'),
+                    labelText: 'Target Operations Goal (الهدف التدريبي)'),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -1029,15 +1102,16 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 6. Add / Edit Operation Sheet (Null-Safe Fixed) ---
+  // --- 6. Add / Edit Operation Sheet ---
   void _showCaseSheet({Map<String, dynamic>? existingCase}) {
     final int? editingId = existingCase?['id'] as int?;
     final bool isEdit = editingId != null;
 
-    final patientIdCtrl =
-        TextEditingController(text: existingCase?['patientId']?.toString() ?? '');
+    final patientIdCtrl = TextEditingController(
+        text: existingCase?['patientId']?.toString() ?? '');
     final ageCtrl = TextEditingController(
-        text: existingCase != null ? (existingCase['age']?.toString() ?? '') : '');
+        text:
+            existingCase != null ? (existingCase['age']?.toString() ?? '') : '');
     final hospitalCtrl = TextEditingController(
         text: existingCase?['hospital']?.toString() ?? _defaultHospital);
     final consultantCtrl = TextEditingController(
@@ -1048,8 +1122,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     final notesCtrl =
         TextEditingController(text: existingCase?['notes']?.toString() ?? '');
 
-    String selectedDate = existingCase?['date']?.toString() ??
-        DateFormat('yyyy-MM-dd').format(DateTime.now());
+    String selectedDate =
+        existingCase?['date']?.toString() ?? formatDate(DateTime.now());
     String selectedSex = existingCase?['sex']?.toString() ?? 'M';
     String selectedCategory = existingCase?['category']?.toString() ??
         kSurgicalProcedures.keys.first;
@@ -1114,8 +1188,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                           );
                           if (picked != null) {
                             setModalState(() {
-                              selectedDate =
-                                  DateFormat('yyyy-MM-dd').format(picked);
+                              selectedDate = formatDate(picked);
                             });
                           }
                         },
@@ -1351,19 +1424,17 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     final tCount = _countByRole('T');
     final aCount = _countByRole('A');
 
-    // Primary Surgeon / Operating roles = P + S-TS + S-TU + T
     final operatingCount = pCount + stsCount + stuCount + tCount;
     final independenceRatio = total == 0 ? 0.0 : operatingCount / total;
-    final goalProgress =
-        _targetCasesGoal <= 0 ? 0.0 : (total / _targetCasesGoal).clamp(0.0, 1.0);
+    final goalProgress = _targetCasesGoal <= 0
+        ? 0.0
+        : (total / _targetCasesGoal).clamp(0.0, 1.0);
 
-    int countUrgency(String u) =>
-        list.where((c) => c['urgency'] == u).length;
+    int countUrgency(String u) => list.where((c) => c['urgency'] == u).length;
 
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
-        // 1. Target Goal Progress Card
         Card(
           color: kCardBg,
           shape: RoundedRectangleBorder(
@@ -1412,8 +1483,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
           ),
         ),
         const SizedBox(height: 12),
-
-        // 2. Surgical Independence vs Assisted Card
         Card(
           color: kCardBg,
           shape: RoundedRectangleBorder(
@@ -1437,7 +1506,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'جراح رئيسي / بإشراف (P, S-TS, S-TU, T): $operatingCount (${(independenceRatio * 100).toStringAsFixed(1)}%)',
+                      'جراح رئيسي / بإشراف: $operatingCount (${(independenceRatio * 100).toStringAsFixed(1)}%)',
                       style: const TextStyle(
                           fontSize: 12, color: Colors.greenAccent),
                     ),
@@ -1454,7 +1523,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   child: LinearProgressIndicator(
                     value: independenceRatio,
                     minHeight: 10,
-                    backgroundColor: Colors.orangeAccent.withAlpha(70),
+                    backgroundColor: const Color(0x46FFAB40),
                     color: Colors.greenAccent,
                   ),
                 ),
@@ -1463,8 +1532,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
           ),
         ),
         const SizedBox(height: 12),
-
-        // 3. CEPOD Urgency Distribution
         Card(
           color: kCardBg,
           shape: RoundedRectangleBorder(
@@ -1498,8 +1565,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
           ),
         ),
         const SizedBox(height: 12),
-
-        // 4. Subspecialty Breakdown
         Card(
           color: kCardBg,
           shape: RoundedRectangleBorder(
@@ -1622,7 +1687,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- PIN Lock Screen ---
   Widget _buildLockScreen() {
     final pinInputCtrl = TextEditingController();
     return Scaffold(
@@ -1928,6 +1992,313 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               child: const Icon(Icons.add),
             )
           : null,
+    );
+  }
+}
+
+// --- Official Consolidation Report Preview & PDF Export Screen ---
+class ConsolidationReportScreen extends StatelessWidget {
+  final String traineeName;
+  final String traineeGrade;
+  final String hospital;
+  final String consultant;
+  final String periodText;
+  final Map<String, Map<String, int>> summary;
+  final List> cases;
+  final Future<String> Function(Uint8List bytes) onSavePdf;
+
+  const ConsolidationReportScreen({
+    super.key,
+    required this.traineeName,
+    required this.traineeGrade,
+    required this.hospital,
+    required this.consultant,
+    required this.periodText,
+    required this.summary,
+    required this.cases,
+    required this.onSavePdf,
+  });
+
+  int _countRole(String r) => cases.where((c) => c['role'] == r).length;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        title: const Text('Consolidation Sheet Preview'),
+        actions: [
+          TextButton.icon(
+            icon: const Icon(Icons.download, color: kGoldColor),
+            label: const Text('حفظ PDF',
+                style:
+                    TextStyle(color: kGoldColor, fontWeight: FontWeight.bold)),
+            onPressed: () async {
+              final bytes = PurePdfGenerator.generateReportPdf(
+                traineeName: traineeName,
+                traineeGrade: traineeGrade,
+                hospital: hospital,
+                consultant: consultant,
+                periodText: periodText,
+                summary: summary,
+                cases: cases,
+              );
+              final path = await onSavePdf(bytes);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('تم حفظ ملف الـ PDF في:\n$path'),
+                    backgroundColor: kCardBg,
+                  ),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: DefaultTextStyle(
+          style: const TextStyle(color: Colors.black87, fontSize: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'PAN-SURGICAL ELECTRONIC LOGBOOK',
+                style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black),
+              ),
+              const SizedBox(height: 4),
+              Text('Surgeon / Trainee: $traineeName ($traineeGrade)'),
+              Text('Institution: $hospital   |   Consultant: $consultant'),
+              Text(
+                'Logbook Period: $periodText',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const Divider(color: Colors.black, thickness: 1.5, height: 20),
+              const Text(
+                '1. Procedure Consolidation Summary',
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black),
+              ),
+              const SizedBox(height: 8),
+              Table(
+                border: TableBorder.all(color: Colors.black54),
+                columnWidths: const {
+                  0: FlexColumnWidth(3.5),
+                  1: FlexColumnWidth(1),
+                  2: FlexColumnWidth(1.2),
+                  3: FlexColumnWidth(1.2),
+                  4: FlexColumnWidth(1),
+                  5: FlexColumnWidth(1),
+                  6: FlexColumnWidth(1.2),
+                },
+                children: [
+                  const TableRow(
+                    decoration: BoxDecoration(color: Color(0xFFE0E0E0)),
+                    children: [
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Procedure',
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('P',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('S-TS',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('S-TU',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('A',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('T',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Total',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.bold))),
+                    ],
+                  ),
+                  ...summary.entries.map(
+                    (e) => TableRow(
+                      children: [
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text(e.key)),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${e.value['P']}',
+                                textAlign: TextAlign.center)),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${e.value['S-TS']}',
+                                textAlign: TextAlign.center)),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${e.value['S-TU']}',
+                                textAlign: TextAlign.center)),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${e.value['A']}',
+                                textAlign: TextAlign.center)),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${e.value['T']}',
+                                textAlign: TextAlign.center)),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${e.value['Total']}',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold))),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(border: Border.all(color: Colors.black)),
+                child: Text(
+                  'Period Total: ${cases.length}  |  Performed (P): ${_countRole('P')}  |  Supervised: ${_countRole('S-TS') + _countRole('S-TU')}  |  Assisted (A): ${_countRole('A')}  |  Training (T): ${_countRole('T')}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                '2. Detailed Operative Logbook Record',
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black),
+              ),
+              const SizedBox(height: 8),
+              Table(
+                border: TableBorder.all(color: Colors.black54),
+                columnWidths: const {
+                  0: FlexColumnWidth(1.6),
+                  1: FlexColumnWidth(1.3),
+                  2: FlexColumnWidth(1.0),
+                  3: FlexColumnWidth(2.8),
+                  4: FlexColumnWidth(1.4),
+                  5: FlexColumnWidth(1.0),
+                },
+                children: [
+                  const TableRow(
+                    decoration: BoxDecoration(color: Color(0xFFE0E0E0)),
+                    children: [
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Date',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 10))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Pt ID',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 10))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Age/S',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 10))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Procedure',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 10))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('CEPOD',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 10))),
+                      Padding(
+                          padding: EdgeInsets.all(4),
+                          child: Text('Role',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 10))),
+                    ],
+                  ),
+                  ...cases.map(
+                    (c) => TableRow(
+                      children: [
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${c['date']}',
+                                style: const TextStyle(fontSize: 10))),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${c['patientId']}',
+                                style: const TextStyle(fontSize: 10))),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${c['age']}/${c['sex']}',
+                                style: const TextStyle(fontSize: 10))),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${c['procedureName']}',
+                                style: const TextStyle(fontSize: 10))),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${c['urgency']}',
+                                style: const TextStyle(fontSize: 10))),
+                        Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Text('${c['role']}',
+                                style: const TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold))),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 36),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Trainee Signature: ____________________'),
+                      const SizedBox(height: 4),
+                      Text(traineeName),
+                    ],
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Consultant Signature: ____________________'),
+                      const SizedBox(height: 4),
+                      Text(consultant),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
