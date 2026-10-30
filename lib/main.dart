@@ -103,7 +103,8 @@ class LogbookDatabase {
   Future<int> updateCase(int id, Map<String, dynamic> row) async {
     final db = await instance.database;
     final cleanRow = Map<String, dynamic>.from(row)..remove('id');
-    return await db.update('operations', cleanRow, where: 'id = ?', whereArgs: [id]);
+    return await db.update('operations', cleanRow,
+        where: 'id = ?', whereArgs: [id]);
   }
 
   Future<List>> fetchAllCases() async {
@@ -206,6 +207,10 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
   String _selectedRoleFilter = 'ALL';
   String _searchQuery = '';
 
+  // Active Screen Date Filter (YYYY-MM-DD)
+  String? _screenStartDate;
+  String? _screenEndDate;
+
   String _traineeName = 'Dr. Surgeon';
   String _traineeGrade = 'General Surgery Resident';
   String _defaultHospital = 'Teaching Hospital';
@@ -234,26 +239,276 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     setState(() => _cases = data);
   }
 
+  // Helper to check if a case date falls within [fromDate, toDate] inclusive
+  bool _isDateInRange(String caseDate, String? fromDate, String? toDate) {
+    if (fromDate != null && caseDate.compareTo(fromDate) < 0) return false;
+    if (toDate != null && caseDate.compareTo(toDate) > 0) return false;
+    return true;
+  }
+
+  List> _getCasesForRange(
+      String? fromDate, String? toDate) {
+    return _cases
+        .where((c) => _isDateInRange(c['date'] as String, fromDate, toDate))
+        .toList();
+  }
+
+  // Cases filtered by the active screen date range
+  List> get _dateFilteredCases =>
+      _getCasesForRange(_screenStartDate, _screenEndDate);
+
+  // Cases displayed in the list (after applying role & search filters)
   List> get _filteredCases {
-    return _cases.where((c) {
+    return _dateFilteredCases.where((c) {
       final matchesRole =
           _selectedRoleFilter == 'ALL' || c['role'] == _selectedRoleFilter;
       final q = _searchQuery.toLowerCase();
-      final matchesSearch = c['procedureName'].toString().toLowerCase().contains(q) ||
-          c['patientId'].toString().toLowerCase().contains(q) ||
-          c['category'].toString().toLowerCase().contains(q) ||
-          c['consultant'].toString().toLowerCase().contains(q);
+      final matchesSearch =
+          c['procedureName'].toString().toLowerCase().contains(q) ||
+              c['patientId'].toString().toLowerCase().contains(q) ||
+              c['category'].toString().toLowerCase().contains(q) ||
+              c['consultant'].toString().toLowerCase().contains(q);
       return matchesRole && matchesSearch;
     }).toList();
   }
 
   int _countByRole(String role) =>
-      _cases.where((c) => c['role'] == role).length;
+      _dateFilteredCases.where((c) => c['role'] == role).length;
 
   void _showSnack(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), backgroundColor: kCardBg),
+    );
+  }
+
+  // --- Date Range Picker Dialog for Export & Filtering ---
+  void _showDateRangeDialog({required String mode}) {
+    // mode: 'pdf', 'csv', or 'screen_filter'
+    String? tempFrom = _screenStartDate;
+    String? tempTo = _screenEndDate;
+    String activePreset =
+        (tempFrom == null && tempTo == null) ? 'all' : 'custom';
+
+    void applyPreset(
+        String preset, void Function(void Function()) setDialogState) {
+      final now = DateTime.now();
+      final fmt = DateFormat('yyyy-MM-dd');
+      setDialogState(() {
+        activePreset = preset;
+        if (preset == 'all') {
+          tempFrom = null;
+          tempTo = null;
+        } else if (preset == 'month') {
+          tempFrom = fmt.format(DateTime(now.year, now.month, 1));
+          tempTo = fmt.format(now);
+        } else if (preset == '3months') {
+          tempFrom = fmt.format(DateTime(now.year, now.month - 3, now.day));
+          tempTo = fmt.format(now);
+        } else if (preset == '6months') {
+          tempFrom = fmt.format(DateTime(now.year, now.month - 6, now.day));
+          tempTo = fmt.format(now);
+        } else if (preset == 'year') {
+          tempFrom = fmt.format(DateTime(now.year, 1, 1));
+          tempTo = fmt.format(now);
+        }
+      });
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final matchingCases = _getCasesForRange(tempFrom, tempTo);
+
+          return AlertDialog(
+            backgroundColor: kCardBg,
+            title: Text(
+              mode == 'pdf'
+                  ? 'تحديد فترة تقرير الـ PDF'
+                  : mode == 'csv'
+                      ? 'تحديد فترة ملف الإكسل (CSV)'
+                      : 'فلترة السجل حسب التاريخ',
+              style: const TextStyle(color: kGoldColor, fontSize: 17),
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text(
+                    'اختيار سريع للفترة التدريبية:',
+                    style: TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      _presetChip('كل السجل', 'all', activePreset,
+                          (p) => applyPreset(p, setDialogState)),
+                      _presetChip('هذا الشهر', 'month', activePreset,
+                          (p) => applyPreset(p, setDialogState)),
+                      _presetChip('آخر 3 أشهر', '3months', activePreset,
+                          (p) => applyPreset(p, setDialogState)),
+                      _presetChip('كورس 6 أشهر', '6months', activePreset,
+                          (p) => applyPreset(p, setDialogState)),
+                      _presetChip('هذه السنة', 'year', activePreset,
+                          (p) => applyPreset(p, setDialogState)),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'أو تحديد تاريخ مخصص (من - إلى):',
+                    style: TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          onTap: () async {
+                            final picked = await showDatePicker(
+                              context: ctx,
+                              initialDate: tempFrom != null
+                                  ? (DateTime.tryParse(tempFrom!) ??
+                                      DateTime.now())
+                                  : DateTime.now(),
+                              firstDate: DateTime(2015),
+                              lastDate: DateTime(2035),
+                            );
+                            if (picked != null) {
+                              setDialogState(() {
+                                activePreset = 'custom';
+                                tempFrom =
+                                    DateFormat('yyyy-MM-dd').format(picked);
+                              });
+                            }
+                          },
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'من تاريخ (From)',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            child: Text(
+                              tempFrom ?? 'البداية',
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: InkWell(
+                          onTap: () async {
+                            final picked = await showDatePicker(
+                              context: ctx,
+                              initialDate: tempTo != null
+                                  ? (DateTime.tryParse(tempTo!) ??
+                                      DateTime.now())
+                                  : DateTime.now(),
+                              firstDate: DateTime(2015),
+                              lastDate: DateTime(2035),
+                            );
+                            if (picked != null) {
+                              setDialogState(() {
+                                activePreset = 'custom';
+                                tempTo =
+                                    DateFormat('yyyy-MM-dd').format(picked);
+                              });
+                            }
+                          },
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'إلى تاريخ (To)',
+                              border: OutlineInputBorder(),
+                              isDense: true,
+                            ),
+                            child: Text(
+                              tempTo ?? 'اليوم',
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: kGoldColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: kGoldColor.withOpacity(0.4)),
+                    ),
+                    child: Text(
+                      'العمليات المشمولة في هذه الفترة: ${matchingCases.length} عملية',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: kGoldColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('إلغاء'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: kGoldColor,
+                  foregroundColor: Colors.black,
+                ),
+                onPressed: matchingCases.isEmpty && mode != 'screen_filter'
+                    ? null
+                    : () {
+                        Navigator.pop(ctx);
+                        if (mode == 'screen_filter') {
+                          setState(() {
+                            _screenStartDate = tempFrom;
+                            _screenEndDate = tempTo;
+                          });
+                        } else if (mode == 'pdf') {
+                          _exportConsolidationPdf(
+                              fromDate: tempFrom, toDate: tempTo);
+                        } else if (mode == 'csv') {
+                          _exportCsv(fromDate: tempFrom, toDate: tempTo);
+                        }
+                      },
+                child: Text(
+                  mode == 'pdf'
+                      ? 'توليد PDF'
+                      : mode == 'csv'
+                          ? 'تصدير CSV'
+                          : 'تطبيق الفلتر',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _presetChip(
+      String label, String key, String activeKey, Function(String) onSelect) {
+    final isSelected = key == activeKey;
+    return ChoiceChip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      selected: isSelected,
+      selectedColor: kGoldColor,
+      labelStyle: TextStyle(
+        color: isSelected ? Colors.black : Colors.white,
+        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+      ),
+      onSelected: (_) => onSelect(key),
     );
   }
 
@@ -275,7 +530,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
       await Share.shareXFiles(
         [XFile(file.path)],
-        text: 'Surgical e-Logbook Backup ($dateStr)',
+        text: 'Surgical e-Logbook Full Backup ($dateStr)',
       );
     } catch (e) {
       _showSnack('Error exporting backup: $e');
@@ -310,7 +565,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
         for (var item in ops) {
           final map = Map<String, dynamic>.from(item);
-          // Avoid duplicates by checking date + patientId + procedureName
           final isDuplicate = existing.any((e) =>
               e['date'] == map['date'] &&
               e['patientId'] == map['patientId'] &&
@@ -318,7 +572,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
           if (!isDuplicate) {
             await LogbookDatabase.instance.insertCase({
-              'date': map['date'] ?? DateFormat('yyyy-MM-dd').format(DateTime.now()),
+              'date': map['date'] ??
+                  DateFormat('yyyy-MM-dd').format(DateTime.now()),
               'patientId': map['patientId'] ?? 'Unknown',
               'age': map['age'] ?? 0,
               'sex': map['sex'] ?? 'M',
@@ -343,9 +598,10 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     }
   }
 
-  // --- 3. CSV Export (Excel & eLogbook Format) ---
-  Future<void> _exportCsv() async {
+  // --- 3. CSV Export (Supports Date Range) ---
+  Future<void> _exportCsv({String? fromDate, String? toDate}) async {
     try {
+      final targetCases = _getCasesForRange(fromDate, toDate);
       final buffer = StringBuffer();
       buffer.writeln(
           'Date,Patient_ID,Age,Sex,Hospital,Consultant,Category,Procedure,CEPOD_Urgency,Role,Complications,Notes');
@@ -355,7 +611,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         return '"$s"';
       }
 
-      for (var c in _cases) {
+      for (var c in targetCases) {
         buffer.writeln([
           esc(c['date']),
           esc(c['patientId']),
@@ -373,32 +629,47 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
       }
 
       final dir = await getTemporaryDirectory();
-      final dateStr = DateFormat('yyyyMMdd').format(DateTime.now());
-      final file = File('${dir.path}/surgical_logbook_$dateStr.csv');
+      final rangeTag = (fromDate != null || toDate != null)
+          ? '${fromDate ?? "Start"}_to_${toDate ?? "Now"}'
+          : DateFormat('yyyyMMdd').format(DateTime.now());
+      final file = File('${dir.path}/surgical_logbook_$rangeTag.csv');
       await file.writeAsString(buffer.toString());
 
       await Share.shareXFiles(
         [XFile(file.path)],
-        text: 'Surgical e-Logbook CSV Spreadsheet',
+        text: 'Surgical e-Logbook CSV ($rangeTag)',
       );
     } catch (e) {
       _showSnack('Error exporting CSV: $e');
     }
   }
 
-  // --- 4. PDF Consolidation Report ---
-  Future<void> _exportConsolidationPdf() async {
+  // --- 4. PDF Consolidation Report (Supports Date Range) ---
+  Future<void> _exportConsolidationPdf(
+      {String? fromDate, String? toDate}) async {
+    final targetCases = _getCasesForRange(fromDate, toDate);
+    if (targetCases.isEmpty) {
+      _showSnack('لا توجد عمليات مسجلة في هذه الفترة');
+      return;
+    }
+
     final pdf = pw.Document();
+    final periodText = (fromDate == null && toDate == null)
+        ? 'All Recorded Operations (Complete Logbook)'
+        : 'From: ${fromDate ?? "Beginning"}   To: ${toDate ?? DateFormat('yyyy-MM-dd').format(DateTime.now())}';
 
     final Map<String, Map<String, int>> summary = {};
-    for (var c in _cases) {
+    for (var c in targetCases) {
       final proc = c['procedureName'] as String;
       final role = c['role'] as String;
-      summary.putIfAbsent(
-          proc, () => {'P': 0, 'S-TS': 0, 'S-TU': 0, 'A': 0, 'T': 0, 'Total': 0});
+      summary.putIfAbsent(proc,
+          () => {'P': 0, 'S-TS': 0, 'S-TU': 0, 'A': 0, 'T': 0, 'Total': 0});
       summary[proc]![role] = (summary[proc]![role] ?? 0) + 1;
       summary[proc]!['Total'] = (summary[proc]!['Total'] ?? 0) + 1;
     }
+
+    int countRoleInTarget(String r) =>
+        targetCases.where((c) => c['role'] == r).length;
 
     pdf.addPage(
       pw.MultiPage(
@@ -422,6 +693,10 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                         style: const pw.TextStyle(fontSize: 11)),
                     pw.Text('Primary Institution: $_defaultHospital',
                         style: const pw.TextStyle(fontSize: 10)),
+                    pw.SizedBox(height: 3),
+                    pw.Text('Logbook Period: $periodText',
+                        style: pw.TextStyle(
+                            fontSize: 10, fontWeight: pw.FontWeight.bold)),
                   ],
                 ),
                 pw.Text(
@@ -458,7 +733,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
             padding: const pw.EdgeInsets.all(8),
             decoration: pw.BoxDecoration(border: pw.Border.all()),
             child: pw.Text(
-              'Total Operations: ${_cases.length}   |   Performed (P): ${_countByRole('P')}   |   Supervised (S-TS / S-TU): ${_countByRole('S-TS') + _countByRole('S-TU')}   |   Assisted (A): ${_countByRole('A')}   |   Training (T): ${_countByRole('T')}',
+              'Period Total: ${targetCases.length}   |   Performed (P): ${countRoleInTarget('P')}   |   Supervised (S-TS / S-TU): ${countRoleInTarget('S-TS') + countRoleInTarget('S-TU')}   |   Assisted (A): ${countRoleInTarget('A')}   |   Training (T): ${countRoleInTarget('T')}',
               style: pw.TextStyle(fontSize: 10, fontWeight: pw.FontWeight.bold),
             ),
           ),
@@ -478,7 +753,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               'Consultant',
               'Complications'
             ],
-            data: _cases
+            data: targetCases
                 .map((c) => [
                       c['date'],
                       c['patientId'],
@@ -549,8 +824,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               const SizedBox(height: 10),
               TextField(
                 controller: gradeCtrl,
-                decoration:
-                    const InputDecoration(labelText: 'Grade / Specialty (الدرجة)'),
+                decoration: const InputDecoration(
+                    labelText: 'Grade / Specialty (الدرجة)'),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -671,8 +946,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                         onTap: () async {
                           final picked = await showDatePicker(
                             context: ctx,
-                            initialDate:
-                                DateTime.tryParse(selectedDate) ?? DateTime.now(),
+                            initialDate: DateTime.tryParse(selectedDate) ??
+                                DateTime.now(),
                             firstDate: DateTime(2015),
                             lastDate: DateTime(2035),
                           );
@@ -727,7 +1002,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                           border: OutlineInputBorder(),
                         ),
                         items: const [
-                          DropdownMenuItem(value: 'M', child: Text('Male (ذكر)')),
+                          DropdownMenuItem(
+                              value: 'M', child: Text('Male (ذكر)')),
                           DropdownMenuItem(
                               value: 'F', child: Text('Female (أنثى)')),
                         ],
@@ -957,6 +1233,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final hasDateFilter = _screenStartDate != null || _screenEndDate != null;
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -971,9 +1249,19 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         ),
         actions: [
           IconButton(
+            icon: Icon(
+              Icons.date_range,
+              color: hasDateFilter ? Colors.amberAccent : kGoldColor,
+            ),
+            tooltip: 'فلترة السجل بالتاريخ',
+            onPressed: () => _showDateRangeDialog(mode: 'screen_filter'),
+          ),
+          IconButton(
             icon: const Icon(Icons.picture_as_pdf),
             tooltip: 'Consolidation PDF Report',
-            onPressed: _cases.isEmpty ? null : _exportConsolidationPdf,
+            onPressed: _cases.isEmpty
+                ? null
+                : () => _showDateRangeDialog(mode: 'pdf'),
           ),
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert),
@@ -982,7 +1270,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               if (value == 'profile') _showProfileDialog();
               if (value == 'export_json') _exportJsonBackup();
               if (value == 'import_json') _importJsonBackup();
-              if (value == 'export_csv') _exportCsv();
+              if (value == 'export_csv') _showDateRangeDialog(mode: 'csv');
             },
             itemBuilder: (ctx) => [
               const PopupMenuItem(
@@ -995,10 +1283,18 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               ),
               const PopupMenuDivider(),
               const PopupMenuItem(
+                value: 'export_csv',
+                child: ListTile(
+                  leading: Icon(Icons.table_chart_outlined, color: kGoldColor),
+                  title: Text('تصدير جدول إكسل (CSV لفترة محددة)'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem(
                 value: 'export_json',
                 child: ListTile(
                   leading: Icon(Icons.cloud_upload_outlined, color: kGoldColor),
-                  title: Text('تصدير نسخة احتياطية (JSON)'),
+                  title: Text('تصدير نسخة احتياطية شاملة (JSON)'),
                   contentPadding: EdgeInsets.zero,
                 ),
               ),
@@ -1011,26 +1307,47 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   contentPadding: EdgeInsets.zero,
                 ),
               ),
-              const PopupMenuItem(
-                value: 'export_csv',
-                child: ListTile(
-                  leading: Icon(Icons.table_chart_outlined, color: kGoldColor),
-                  title: Text('تصدير جدول إكسل (CSV)'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
             ],
           ),
         ],
       ),
       body: Column(
         children: [
+          if (hasDateFilter)
+            Container(
+              margin: const EdgeInsets.only(left: 12, right: 12, top: 10),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: kGoldColor.withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: kGoldColor),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'الفترة المعروضة: ${_screenStartDate ?? "البداية"} ← ${_screenEndDate ?? "اليوم"}',
+                    style: const TextStyle(
+                        color: kGoldColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold),
+                  ),
+                  InkWell(
+                    onTap: () => setState(() {
+                      _screenStartDate = null;
+                      _screenEndDate = null;
+                    }),
+                    child: const Icon(Icons.close, size: 18, color: kGoldColor),
+                  ),
+                ],
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.all(12),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _buildStatChip('Total', _cases.length, 'ALL'),
+                _buildStatChip('Total', _dateFilteredCases.length, 'ALL'),
                 _buildStatChip('P', _countByRole('P'), 'P'),
                 _buildStatChip('S-TS', _countByRole('S-TS'), 'S-TS'),
                 _buildStatChip('S-TU', _countByRole('S-TU'), 'S-TU'),
@@ -1057,7 +1374,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
           Expanded(
             child: _filteredCases.isEmpty
                 ? const Center(
-                    child: Text('No operations logged yet. Tap + to add.'))
+                    child: Text('No operations found in the selected period.'))
                 : ListView.builder(
                     padding: const EdgeInsets.all(12),
                     itemCount: _filteredCases.length,
