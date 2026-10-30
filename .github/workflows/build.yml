@@ -23,18 +23,21 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Generate Android Platform Files
+      - name: Clean & Prepare Project Files
         run: |
-          cp pubspec.yaml pubspec.yaml.bak
+          if [ -f "main.dart" ] && [ ! -f "lib/main.dart" ]; then
+            mkdir -p lib
+            mv main.dart lib/main.dart
+          fi
+          sed -i '/\/\/ === END_OF_FILE ===/q' lib/main.dart
           cp -r lib lib_bak
+          rm -rf android ios linux macos web windows test pubspec.lock
           flutter create --project-name surgical_elogbook --org com.surgeon.elogbook .
-          rm -rf test
-          mv pubspec.yaml.bak pubspec.yaml
-          rm -rf lib
+          rm -rf test lib
           mv lib_bak lib
 
-      - name: Install Dependencies
-        run: flutter pub get
+      - name: Verify Dart Syntax
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
 
       - name: Build Release APK
         run: flutter build apk --release
