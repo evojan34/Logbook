@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -40,6 +39,7 @@ class SurgicalLogbookApp extends StatelessWidget {
       title: 'Surgical e-Logbook',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        useMaterial3: true,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: kDarkBg,
         primaryColor: kGoldColor,
@@ -64,7 +64,6 @@ class SurgicalLogbookApp extends StatelessWidget {
   }
 }
 
-// --- Pure Dart Persistent Local Database (Zero Native Plugin Risk) ---
 class LogbookDatabase {
   static final LogbookDatabase instance = LogbookDatabase._init();
   LogbookDatabase._init();
@@ -149,7 +148,8 @@ class LogbookDatabase {
     final List> result =
         ops.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     result.sort((a, b) {
-      final c = (b['date']?.toString() ?? '').compareTo(a['date']?.toString() ?? '');
+      final c =
+          (b['date']?.toString() ?? '').compareTo(a['date']?.toString() ?? '');
       if (c != 0) return c;
       return (b['id'] as int? ?? 0).compareTo(a['id'] as int? ?? 0);
     });
@@ -183,7 +183,6 @@ class LogbookDatabase {
   }
 }
 
-// --- Pure Dart PDF 1.4 File Builder ---
 class PurePdfGenerator {
   static String _cleanAscii(String input) {
     final ascii = input.replaceAll(RegExp(r'[^\x20-\x7E]'), '');
@@ -206,47 +205,64 @@ class PurePdfGenerator {
     lines.add('PAN-SURGICAL ELECTRONIC LOGBOOK - CONSOLIDATION REPORT');
     lines.add('Surgeon / Trainee: $traineeName ($traineeGrade)');
     lines.add('Institution: $hospital   |   Supervisor: $consultant');
-    lines.add('Period: $periodText   |   Printed: ${formatDate(DateTime.now())}');
+    lines.add(
+        'Period: $periodText   |   Printed: ${formatDate(DateTime.now())}');
     lines.add('=' * 85);
     lines.add('1. PROCEDURE CONSOLIDATION SUMMARY');
     lines.add('-' * 85);
-    lines.add(
-        '${"Procedure Name".padRight(42)} ${"P".padLeft(5)} ${"S-TS".padLeft(6)} ${"S-TU".padLeft(6)} ${"A".padLeft(5)} ${"T".padLeft(5)} ${"Total".padLeft(7)}');
+    final hdr = 'Procedure Name'.padRight(42) +
+        'P'.padLeft(5) +
+        'S-TS'.padLeft(6) +
+        'S-TU'.padLeft(6) +
+        'A'.padLeft(5) +
+        'T'.padLeft(5) +
+        'Total'.padLeft(7);
+    lines.add(hdr);
     lines.add('-' * 85);
 
     for (final entry in summary.entries) {
       final name = entry.key.length > 40
-          ? entry.key.substring(0, 40)
+          ? entry.key.substring(0, 40).padRight(42)
           : entry.key.padRight(42);
       final v = entry.value;
-      lines.add(
-          '$name ${(v['P'] ?? 0).toString().padLeft(5)} ${(v['S-TS'] ?? 0).toString().padLeft(6)} ${(v['S-TU'] ?? 0).toString().padLeft(6)} ${(v['A'] ?? 0).toString().padLeft(5)} ${(v['T'] ?? 0).toString().padLeft(5)} ${(v['Total'] ?? 0).toString().padLeft(7)}');
+      final pStr = (v['P'] ?? 0).toString().padLeft(5);
+      final stsStr = (v['S-TS'] ?? 0).toString().padLeft(6);
+      final stuStr = (v['S-TU'] ?? 0).toString().padLeft(6);
+      final aStr = (v['A'] ?? 0).toString().padLeft(5);
+      final tStr = (v['T'] ?? 0).toString().padLeft(5);
+      final totStr = (v['Total'] ?? 0).toString().padLeft(7);
+      lines.add('$name$pStr$stsStr$stuStr$aStr$tStr$totStr');
     }
 
     int countRole(String r) => cases.where((c) => c['role'] == r).length;
     lines.add('-' * 85);
     lines.add(
-        'TOTAL CASES: ${cases.length}  |  P: ${countRole("P")}  |  S-TS: ${countRole("S-TS")}  |  S-TU: ${countRole("S-TU")}  |  A: ${countRole("A")}  |  T: ${countRole("T")}');
+        'TOTAL: ${cases.length} | P: ${countRole("P")} | S-TS: ${countRole("S-TS")} | S-TU: ${countRole("S-TU")} | A: ${countRole("A")} | T: ${countRole("T")}');
     lines.add('=' * 85);
     lines.add('');
     lines.add('2. DETAILED OPERATIVE LOGBOOK RECORD');
     lines.add('-' * 85);
-    lines.add(
-        '${"Date".padRight(11)} ${"Pt ID".padRight(10)} ${"Age/S".padRight(7)} ${"Procedure".padRight(32)} ${"CEPOD".padRight(10)} ${"Role".padRight(6)}');
+    final dtlHdr = 'Date'.padRight(12) +
+        'Pt ID'.padRight(11) +
+        'Age/S'.padRight(8) +
+        'Procedure'.padRight(33) +
+        'CEPOD'.padRight(11) +
+        'Role'.padRight(6);
+    lines.add(dtlHdr);
     lines.add('-' * 85);
 
     for (final c in cases) {
-      final date = (c['date']?.toString() ?? '').padRight(11);
+      final date = (c['date']?.toString() ?? '').padRight(12);
       final pt = (c['patientId']?.toString() ?? '');
-      final ptPad = (pt.length > 9 ? pt.substring(0, 9) : pt).padRight(10);
-      final ageSex = '${c['age']}/${c['sex']}'.padRight(7);
+      final ptPad = (pt.length > 9 ? pt.substring(0, 9) : pt).padRight(11);
+      final ageSex = '${c['age']}/${c['sex']}'.padRight(8);
       final proc = (c['procedureName']?.toString() ?? '');
       final procPad =
-          (proc.length > 30 ? proc.substring(0, 30) : proc).padRight(32);
+          (proc.length > 30 ? proc.substring(0, 30) : proc).padRight(33);
       final urg = (c['urgency']?.toString() ?? '');
-      final urgPad = (urg.length > 9 ? urg.substring(0, 9) : urg).padRight(10);
+      final urgPad = (urg.length > 9 ? urg.substring(0, 9) : urg).padRight(11);
       final role = (c['role']?.toString() ?? '').padRight(6);
-      lines.add('$date $ptPad $ageSex $procPad $urgPad $role');
+      lines.add('$date$ptPad$ageSex$procPad$urgPad$role');
     }
 
     lines.add('');
@@ -254,7 +270,6 @@ class PurePdfGenerator {
     lines.add(
         'Trainee Signature: ___________________    Consultant Signature: ___________________');
 
-    // Split into pages of 52 lines
     const int linesPerPage = 52;
     final List<List<String>> pages = [];
     for (int i = 0; i < lines.length; i += linesPerPage) {
@@ -265,7 +280,6 @@ class PurePdfGenerator {
     if (pages.isEmpty) pages.add(['Empty Logbook']);
 
     final List<String> objects = [];
-    // Obj 1: Catalog, Obj 2: Pages, Obj 3: Font Courier
     objects.add('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
 
     final List<String> pageRefs = [];
@@ -320,7 +334,6 @@ class PurePdfGenerator {
   }
 }
 
-// --- Categorized General Surgery Procedures ---
 final Map<String, List<String>> kSurgicalProcedures = {
   'Appendix & Diagnostic': [
     'Open Appendicectomy',
@@ -348,7 +361,7 @@ final Map<String, List<String>> kSurgicalProcedures = {
     'Small Bowel Resection & Anastomosis',
     'Adhesiolysis (Intestinal Obstruction)',
     'Right / Left Hemicolectomy',
-    'Hartmann\'s Procedure',
+    'Hartmann Procedure',
     'Colostomy / Ileostomy Creation or Closure',
   ],
   'Coloproctology & Perianal': [
@@ -377,7 +390,6 @@ final Map<String, List<String>> kSurgicalProcedures = {
   ],
 };
 
-// --- Main Screen ---
 class LogbookHomeScreen extends StatefulWidget {
   const LogbookHomeScreen({super.key});
 
@@ -513,7 +525,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- Date Range Picker Dialog ---
   void _showDateRangeDialog({required String mode}) {
     String? tempFrom = _screenStartDate;
     String? tempTo = _screenEndDate;
@@ -739,7 +750,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 1. JSON Backup Export ---
   Future<void> _exportJsonBackup() async {
     try {
       final settings = await LogbookDatabase.instance.loadSettings();
@@ -758,12 +768,11 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         Uint8List.fromList(utf8.encode(jsonString)),
       );
       _showSnack('تم حفظ النسخة الاحتياطية ونسخها للحافظة:\n$savedPath');
-    } catch (e) {
+    } catch (_) {
       _showSnack('تم نسخ النسخة الاحتياطية للحافظة');
     }
   }
 
-  // --- 2. JSON Backup Restore Dialog ---
   Future<void> _showRestoreBackupDialog() async {
     final textCtrl = TextEditingController();
     final storageDir = await LogbookDatabase.instance.getStorageDir();
@@ -917,12 +926,11 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
       await _initData();
       _showSnack('تم استيراد $importedCount عملية بنجاح');
-    } catch (e) {
+    } catch (_) {
       _showSnack('فشل الاستيراد: تأكد من صحة نص JSON');
     }
   }
 
-  // --- 3. CSV Export ---
   Future<void> _exportCsv({String? fromDate, String? toDate}) async {
     try {
       final targetCases = _getCasesForRange(fromDate, toDate);
@@ -969,7 +977,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     }
   }
 
-  // --- 4. Open Consolidation Report Preview & PDF Export Screen ---
   void _openConsolidationReportScreen({String? fromDate, String? toDate}) {
     final targetCases = _getCasesForRange(fromDate, toDate);
     if (targetCases.isEmpty) {
@@ -1011,7 +1018,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 5. Profile, Target Goal & PIN Settings Dialog ---
   void _showProfileDialog() {
     final nameCtrl = TextEditingController(text: _traineeName);
     final gradeCtrl = TextEditingController(text: _traineeGrade);
@@ -1102,7 +1108,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 6. Add / Edit Operation Sheet ---
   void _showCaseSheet({Map<String, dynamic>? existingCase}) {
     final int? editingId = existingCase?['id'] as int?;
     final bool isEdit = editingId != null;
@@ -1413,7 +1418,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- Analytics Dashboard View ---
   Widget _buildAnalyticsDashboard() {
     final list = _dateFilteredCases;
     final total = list.length;
@@ -1996,7 +2000,6 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
   }
 }
 
-// --- Official Consolidation Report Preview & PDF Export Screen ---
 class ConsolidationReportScreen extends StatelessWidget {
   final String traineeName;
   final String traineeGrade;
@@ -2177,7 +2180,8 @@ class ConsolidationReportScreen extends StatelessWidget {
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(border: Border.all(color: Colors.black)),
+                decoration:
+                    BoxDecoration(border: Border.all(color: Colors.black)),
                 child: Text(
                   'Period Total: ${cases.length}  |  Performed (P): ${_countRole('P')}  |  Supervised: ${_countRole('S-TS') + _countRole('S-TU')}  |  Assisted (A): ${_countRole('A')}  |  Training (T): ${_countRole('T')}',
                   style: const TextStyle(fontWeight: FontWeight.bold),
@@ -2302,3 +2306,4 @@ class ConsolidationReportScreen extends StatelessWidget {
     );
   }
 }
+// === END_OF_FILE ===
