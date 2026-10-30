@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -9,7 +10,6 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:file_picker/file_picker.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -17,6 +17,8 @@ void main() async {
 }
 
 const Color kGoldColor = Color(0xFFD4AF37);
+const Color kGoldBorder = Color(0x40D4AF37);
+const Color kGoldSubtle = Color(0x26D4AF37);
 const Color kDarkBg = Color(0xFF121212);
 const Color kCardBg = Color(0xFF1E1E1E);
 
@@ -103,8 +105,12 @@ class LogbookDatabase {
   Future<int> updateCase(int id, Map<String, dynamic> row) async {
     final db = await instance.database;
     final cleanRow = Map<String, dynamic>.from(row)..remove('id');
-    return await db.update('operations', cleanRow,
-        where: 'id = ?', whereArgs: [id]);
+    return await db.update(
+      'operations',
+      cleanRow,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<List>> fetchAllCases() async {
@@ -130,8 +136,10 @@ class LogbookDatabase {
     final db = await instance.database;
     final rows = await db.query('settings');
     final Map<String, String> map = {};
-    for (var r in rows) {
-      map[r['key'] as String] = r['value'] as String;
+    for (final r in rows) {
+      final k = r['key']?.toString() ?? '';
+      final v = r['value']?.toString() ?? '';
+      if (k.isNotEmpty) map[k] = v;
     }
     return map;
   }
@@ -203,11 +211,11 @@ class LogbookHomeScreen extends StatefulWidget {
 }
 
 class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
+  int _currentTabIndex = 0; // 0 = Operations Log, 1 = Analytics Dashboard
   List> _cases = [];
   String _selectedRoleFilter = 'ALL';
   String _searchQuery = '';
 
-  // Active Screen Date Filter (YYYY-MM-DD)
   String? _screenStartDate;
   String? _screenEndDate;
 
@@ -215,21 +223,30 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
   String _traineeGrade = 'General Surgery Resident';
   String _defaultHospital = 'Teaching Hospital';
   String _defaultConsultant = 'Consultant Surgeon';
+  int _targetCasesGoal = 200;
+  String _pinCode = '';
+  bool _isLocked = false;
 
   @override
   void initState() {
     super.initState();
-    _initData();
+    _initData(checkPinOnStart: true);
   }
 
-  Future<void> _initData() async {
+  Future<void> _initData({bool checkPinOnStart = false}) async {
     final settings = await LogbookDatabase.instance.loadSettings();
     final data = await LogbookDatabase.instance.fetchAllCases();
+    final savedPin = settings['pinCode'] ?? '';
     setState(() {
       _traineeName = settings['traineeName'] ?? 'Dr. Surgeon';
       _traineeGrade = settings['traineeGrade'] ?? 'General Surgery Resident';
       _defaultHospital = settings['defaultHospital'] ?? 'Teaching Hospital';
       _defaultConsultant = settings['defaultConsultant'] ?? 'Consultant Surgeon';
+      _targetCasesGoal = int.tryParse(settings['targetCasesGoal'] ?? '200') ?? 200;
+      _pinCode = savedPin;
+      if (checkPinOnStart && savedPin.isNotEmpty) {
+        _isLocked = true;
+      }
       _cases = data;
     });
   }
@@ -239,35 +256,32 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     setState(() => _cases = data);
   }
 
-  // Helper to check if a case date falls within [fromDate, toDate] inclusive
   bool _isDateInRange(String caseDate, String? fromDate, String? toDate) {
     if (fromDate != null && caseDate.compareTo(fromDate) < 0) return false;
     if (toDate != null && caseDate.compareTo(toDate) > 0) return false;
     return true;
   }
 
-  List> _getCasesForRange(
-      String? fromDate, String? toDate) {
+  List> _getCasesForRange(String? fromDate, String? toDate) {
     return _cases
-        .where((c) => _isDateInRange(c['date'] as String, fromDate, toDate))
+        .where((c) => _isDateInRange(c['date']?.toString() ?? '', fromDate, toDate))
         .toList();
   }
 
-  // Cases filtered by the active screen date range
   List> get _dateFilteredCases =>
       _getCasesForRange(_screenStartDate, _screenEndDate);
 
-  // Cases displayed in the list (after applying role & search filters)
   List> get _filteredCases {
     return _dateFilteredCases.where((c) {
+      final role = c['role']?.toString() ?? '';
       final matchesRole =
-          _selectedRoleFilter == 'ALL' || c['role'] == _selectedRoleFilter;
+          _selectedRoleFilter == 'ALL' || role == _selectedRoleFilter;
       final q = _searchQuery.toLowerCase();
       final matchesSearch =
-          c['procedureName'].toString().toLowerCase().contains(q) ||
-              c['patientId'].toString().toLowerCase().contains(q) ||
-              c['category'].toString().toLowerCase().contains(q) ||
-              c['consultant'].toString().toLowerCase().contains(q);
+          (c['procedureName']?.toString() ?? '').toLowerCase().contains(q) ||
+              (c['patientId']?.toString() ?? '').toLowerCase().contains(q) ||
+              (c['category']?.toString() ?? '').toLowerCase().contains(q) ||
+              (c['consultant']?.toString() ?? '').toLowerCase().contains(q);
       return matchesRole && matchesSearch;
     }).toList();
   }
@@ -282,9 +296,33 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- Date Range Picker Dialog for Export & Filtering ---
+  // --- Reusable Custom Dropdown Builder (Compatible with all Flutter versions) ---
+  Widget _buildDropdown({
+    required String label,
+    required String value,
+    required List<DropdownMenuItem<String>> items,
+    required ValueChanged<String?> onChanged,
+  }) {
+    return InputDecorator(
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          dropdownColor: kCardBg,
+          items: items,
+          onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+
+  // --- Date Range Picker Dialog ---
   void _showDateRangeDialog({required String mode}) {
-    // mode: 'pdf', 'csv', or 'screen_filter'
     String? tempFrom = _screenStartDate;
     String? tempTo = _screenEndDate;
     String activePreset =
@@ -328,8 +366,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   ? 'تحديد فترة تقرير الـ PDF'
                   : mode == 'csv'
                       ? 'تحديد فترة ملف الإكسل (CSV)'
-                      : 'فلترة السجل حسب التاريخ',
-              style: const TextStyle(color: kGoldColor, fontSize: 17),
+                      : 'فلترة السجل والإحصائيات بالتاريخ',
+              style: const TextStyle(color: kGoldColor, fontSize: 16),
             ),
             content: SingleChildScrollView(
               child: Column(
@@ -438,9 +476,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   Container(
                     padding: const EdgeInsets.all(10),
                     decoration: BoxDecoration(
-                      color: kGoldColor.withOpacity(0.12),
+                      color: kGoldSubtle,
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: kGoldColor.withOpacity(0.4)),
+                      border: Border.all(color: kGoldBorder),
                     ),
                     child: Text(
                       'العمليات المشمولة في هذه الفترة: ${matchingCases.length} عملية',
@@ -512,7 +550,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 1. JSON Backup Export ---
+  // --- 1. JSON Backup Export (Saves Locally + Copies to Clipboard + Shares File) ---
   Future<void> _exportJsonBackup() async {
     try {
       final settings = await LogbookDatabase.instance.loadSettings();
@@ -523,36 +561,137 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         'operations': _cases,
       };
       final jsonString = const JsonEncoder.withIndent('  ').convert(backupData);
-      final dir = await getTemporaryDirectory();
+
+      // Copy to clipboard automatically as a fallback
+      await Clipboard.setData(ClipboardData(text: jsonString));
+
+      // Save to app documents directory & share
+      final docDir = await getApplicationDocumentsDirectory();
       final dateStr = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
-      final file = File('${dir.path}/elogbook_backup_$dateStr.json');
-      await file.writeAsString(jsonString);
+      final localFile = File('${docDir.path}/elogbook_backup_$dateStr.json');
+      await localFile.writeAsString(jsonString);
 
       await Share.shareXFiles(
-        [XFile(file.path)],
-        text: 'Surgical e-Logbook Full Backup ($dateStr)',
+        [XFile(localFile.path)],
+        text: 'Surgical e-Logbook Backup ($dateStr)',
       );
     } catch (e) {
-      _showSnack('Error exporting backup: $e');
+      _showSnack('تم نسخ النسخة الاحتياطية للحافظة: $e');
     }
   }
 
-  // --- 2. JSON Backup Restore ---
-  Future<void> _importJsonBackup() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['json'],
-      );
-      if (result == null || result.files.single.path == null) return;
+  // --- 2. JSON Backup Restore Dialog (From Local Backups or Clipboard/Text) ---
+  Future<void> _showRestoreBackupDialog() async {
+    final textCtrl = TextEditingController();
+    final docDir = await getApplicationDocumentsDirectory();
+    final List<File> localBackups = docDir
+        .listSync()
+        .whereType<File>()
+        .where((f) => f.path.endsWith('.json'))
+        .toList();
 
-      final file = File(result.files.single.path!);
-      final content = await file.readAsString();
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: kCardBg,
+        title: const Text(
+          'استعادة نسخة احتياطية (Restore)',
+          style: TextStyle(color: kGoldColor, fontSize: 16),
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (localBackups.isNotEmpty) ...[
+                const Text(
+                  'نسخ احتياطية محفوظة في الهاتف:',
+                  style: TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+                const SizedBox(height: 6),
+                ...localBackups.reversed.take(3).map(
+                      (file) => Card(
+                        color: kDarkBg,
+                        child: ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.restore_page,
+                              color: kGoldColor),
+                          title: Text(
+                            p.basename(file.path),
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          onTap: () async {
+                            final content = await file.readAsString();
+                            if (mounted) Navigator.pop(ctx);
+                            await _processJsonRestore(content);
+                          },
+                        ),
+                      ),
+                    ),
+                const Divider(height: 20),
+              ],
+              const Text(
+                'أو الصق محتوى ملف النسخة الاحتياطية (JSON):',
+                style: TextStyle(fontSize: 12, color: Colors.white70),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                icon: const Icon(Icons.content_paste, color: kGoldColor),
+                label: const Text('لصق تلقائي من الحافظة (Paste)',
+                    style: TextStyle(color: kGoldColor)),
+                onPressed: () async {
+                  final clip = await Clipboard.getData(Clipboard.kTextPlain);
+                  if (clip?.text != null) {
+                    textCtrl.text = clip!.text!;
+                  }
+                },
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: textCtrl,
+                maxLines: 4,
+                decoration: const InputDecoration(
+                  hintText: '{"version": 2, "operations": [...]}',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('إلغاء'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: kGoldColor,
+              foregroundColor: Colors.black,
+            ),
+            onPressed: () async {
+              final content = textCtrl.text.trim();
+              if (content.isEmpty) return;
+              Navigator.pop(ctx);
+              await _processJsonRestore(content);
+            },
+            child: const Text('استعادة الآن',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _processJsonRestore(String content) async {
+    try {
       final Map<String, dynamic> data = jsonDecode(content);
 
       if (data['settings'] != null && data['settings'] is Map) {
-        final Map<String, dynamic> s = data['settings'];
-        for (var entry in s.entries) {
+        final Map<String, dynamic> s =
+            Map<String, dynamic>.from(data['settings']);
+        for (final entry in s.entries) {
           await LogbookDatabase.instance
               .saveSetting(entry.key, entry.value.toString());
         }
@@ -563,7 +702,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         final List ops = data['operations'];
         final existing = await LogbookDatabase.instance.fetchAllCases();
 
-        for (var item in ops) {
+        for (final item in ops) {
           final map = Map<String, dynamic>.from(item);
           final isDuplicate = existing.any((e) =>
               e['date'] == map['date'] &&
@@ -572,19 +711,19 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
           if (!isDuplicate) {
             await LogbookDatabase.instance.insertCase({
-              'date': map['date'] ??
+              'date': map['date']?.toString() ??
                   DateFormat('yyyy-MM-dd').format(DateTime.now()),
-              'patientId': map['patientId'] ?? 'Unknown',
-              'age': map['age'] ?? 0,
-              'sex': map['sex'] ?? 'M',
-              'hospital': map['hospital'] ?? _defaultHospital,
-              'consultant': map['consultant'] ?? _defaultConsultant,
-              'category': map['category'] ?? 'General',
-              'procedureName': map['procedureName'] ?? 'Operation',
-              'urgency': map['urgency'] ?? 'Elective',
-              'role': map['role'] ?? 'P',
-              'complications': map['complications'] ?? 'None',
-              'notes': map['notes'] ?? '',
+              'patientId': map['patientId']?.toString() ?? 'Unknown',
+              'age': int.tryParse(map['age']?.toString() ?? '0') ?? 0,
+              'sex': map['sex']?.toString() ?? 'M',
+              'hospital': map['hospital']?.toString() ?? _defaultHospital,
+              'consultant': map['consultant']?.toString() ?? _defaultConsultant,
+              'category': map['category']?.toString() ?? 'Appendix & Diagnostic',
+              'procedureName': map['procedureName']?.toString() ?? 'Operation',
+              'urgency': map['urgency']?.toString() ?? 'Elective',
+              'role': map['role']?.toString() ?? 'P',
+              'complications': map['complications']?.toString() ?? 'None',
+              'notes': map['notes']?.toString() ?? '',
             });
             importedCount++;
           }
@@ -594,11 +733,11 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
       await _initData();
       _showSnack('تم استيراد $importedCount عملية بنجاح');
     } catch (e) {
-      _showSnack('فشل استيراد الملف: تأكد من صحة صيغة JSON');
+      _showSnack('فشل الاستيراد: تأكد من صحة نص JSON');
     }
   }
 
-  // --- 3. CSV Export (Supports Date Range) ---
+  // --- 3. CSV Export ---
   Future<void> _exportCsv({String? fromDate, String? toDate}) async {
     try {
       final targetCases = _getCasesForRange(fromDate, toDate);
@@ -611,7 +750,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         return '"$s"';
       }
 
-      for (var c in targetCases) {
+      for (final c in targetCases) {
         buffer.writeln([
           esc(c['date']),
           esc(c['patientId']),
@@ -644,7 +783,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     }
   }
 
-  // --- 4. PDF Consolidation Report (Supports Date Range) ---
+  // --- 4. PDF Consolidation Report ---
   Future<void> _exportConsolidationPdf(
       {String? fromDate, String? toDate}) async {
     final targetCases = _getCasesForRange(fromDate, toDate);
@@ -659,9 +798,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         : 'From: ${fromDate ?? "Beginning"}   To: ${toDate ?? DateFormat('yyyy-MM-dd').format(DateTime.now())}';
 
     final Map<String, Map<String, int>> summary = {};
-    for (var c in targetCases) {
-      final proc = c['procedureName'] as String;
-      final role = c['role'] as String;
+    for (final c in targetCases) {
+      final proc = c['procedureName']?.toString() ?? 'Operation';
+      final role = c['role']?.toString() ?? 'P';
       summary.putIfAbsent(proc,
           () => {'P': 0, 'S-TS': 0, 'S-TU': 0, 'A': 0, 'T': 0, 'Total': 0});
       summary[proc]![role] = (summary[proc]![role] ?? 0) + 1;
@@ -755,14 +894,14 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
             ],
             data: targetCases
                 .map((c) => [
-                      c['date'],
-                      c['patientId'],
+                      c['date']?.toString() ?? '',
+                      c['patientId']?.toString() ?? '',
                       '${c['age']}/${c['sex']}',
-                      c['procedureName'],
-                      c['urgency'],
-                      c['role'],
-                      c['consultant'],
-                      c['complications'],
+                      c['procedureName']?.toString() ?? '',
+                      c['urgency']?.toString() ?? '',
+                      c['role']?.toString() ?? '',
+                      c['consultant']?.toString() ?? '',
+                      c['complications']?.toString() ?? '',
                     ])
                 .toList(),
             headerStyle:
@@ -799,19 +938,21 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     await Printing.layoutPdf(onLayout: (format) async => pdf.save());
   }
 
-  // --- 5. Trainee Profile Settings Dialog ---
+  // --- 5. Profile, Target Goal & PIN Settings Dialog ---
   void _showProfileDialog() {
     final nameCtrl = TextEditingController(text: _traineeName);
     final gradeCtrl = TextEditingController(text: _traineeGrade);
     final hospCtrl = TextEditingController(text: _defaultHospital);
     final consCtrl = TextEditingController(text: _defaultConsultant);
+    final goalCtrl = TextEditingController(text: _targetCasesGoal.toString());
+    final pinCtrl = TextEditingController(text: _pinCode);
 
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: kCardBg,
-        title: const Text('بيانات الطبيب والتقرير',
-            style: TextStyle(color: kGoldColor)),
+        title: const Text('بيانات الطبيب والإعدادات',
+            style: TextStyle(color: kGoldColor, fontSize: 16)),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -825,7 +966,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               TextField(
                 controller: gradeCtrl,
                 decoration: const InputDecoration(
-                    labelText: 'Grade / Specialty (الدرجة)'),
+                    labelText: 'Grade / Specialty (الدرجة العلمية)'),
               ),
               const SizedBox(height: 10),
               TextField(
@@ -838,6 +979,21 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                 controller: consCtrl,
                 decoration: const InputDecoration(
                     labelText: 'Default Consultant (المشرف الافتراضي)'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: goalCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                    labelText: 'Target Operations Goal (الهدف التدريبي للعمليات)'),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: pinCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'PIN Lock (رمز قفل التطبيق - اتركه فارغاً للإلغاء)',
+                ),
               ),
             ],
           ),
@@ -859,6 +1015,10 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   .saveSetting('defaultHospital', hospCtrl.text.trim());
               await LogbookDatabase.instance
                   .saveSetting('defaultConsultant', consCtrl.text.trim());
+              await LogbookDatabase.instance
+                  .saveSetting('targetCasesGoal', goalCtrl.text.trim());
+              await LogbookDatabase.instance
+                  .saveSetting('pinCode', pinCtrl.text.trim());
               if (mounted) Navigator.pop(ctx);
               _initData();
             },
@@ -869,45 +1029,46 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
-  // --- 6. Add / Edit Operation Sheet ---
+  // --- 6. Add / Edit Operation Sheet (Null-Safe Fixed) ---
   void _showCaseSheet({Map<String, dynamic>? existingCase}) {
-    final isEdit = existingCase != null;
+    final int? editingId = existingCase?['id'] as int?;
+    final bool isEdit = editingId != null;
 
     final patientIdCtrl =
-        TextEditingController(text: existingCase?['patientId'] ?? '');
+        TextEditingController(text: existingCase?['patientId']?.toString() ?? '');
     final ageCtrl = TextEditingController(
-        text: existingCase != null ? existingCase['age'].toString() : '');
+        text: existingCase != null ? (existingCase['age']?.toString() ?? '') : '');
     final hospitalCtrl = TextEditingController(
-        text: existingCase?['hospital'] ?? _defaultHospital);
+        text: existingCase?['hospital']?.toString() ?? _defaultHospital);
     final consultantCtrl = TextEditingController(
-        text: existingCase?['consultant'] ?? _defaultConsultant);
+        text: existingCase?['consultant']?.toString() ?? _defaultConsultant);
     final customProcCtrl = TextEditingController();
-    final complicationsCtrl =
-        TextEditingController(text: existingCase?['complications'] ?? 'None');
+    final complicationsCtrl = TextEditingController(
+        text: existingCase?['complications']?.toString() ?? 'None');
     final notesCtrl =
-        TextEditingController(text: existingCase?['notes'] ?? '');
+        TextEditingController(text: existingCase?['notes']?.toString() ?? '');
 
-    String selectedDate = existingCase?['date'] ??
+    String selectedDate = existingCase?['date']?.toString() ??
         DateFormat('yyyy-MM-dd').format(DateTime.now());
-    String selectedSex = existingCase?['sex'] ?? 'M';
-    String selectedCategory =
-        existingCase?['category'] ?? kSurgicalProcedures.keys.first;
+    String selectedSex = existingCase?['sex']?.toString() ?? 'M';
+    String selectedCategory = existingCase?['category']?.toString() ??
+        kSurgicalProcedures.keys.first;
     if (!kSurgicalProcedures.containsKey(selectedCategory)) {
       selectedCategory = kSurgicalProcedures.keys.first;
     }
 
     List<String> currentCategoryProcs = kSurgicalProcedures[selectedCategory]!;
-    String selectedProcedure =
-        existingCase?['procedureName'] ?? currentCategoryProcs.first;
+    String selectedProcedure = existingCase?['procedureName']?.toString() ??
+        currentCategoryProcs.first;
     if (!currentCategoryProcs.contains(selectedProcedure)) {
       selectedCategory = 'Trauma, Vascular & Minor';
       currentCategoryProcs = kSurgicalProcedures[selectedCategory]!;
       selectedProcedure = 'Other (Custom Procedure)';
-      customProcCtrl.text = existingCase?['procedureName'] ?? '';
+      customProcCtrl.text = existingCase?['procedureName']?.toString() ?? '';
     }
 
-    String selectedUrgency = existingCase?['urgency'] ?? 'Elective';
-    String selectedRole = existingCase?['role'] ?? 'P';
+    String selectedUrgency = existingCase?['urgency']?.toString() ?? 'Elective';
+    String selectedRole = existingCase?['role']?.toString() ?? 'P';
 
     showModalBottomSheet(
       context: context,
@@ -995,12 +1156,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: DropdownButtonFormField<String>(
+                      child: _buildDropdown(
+                        label: 'Sex (الجنس)',
                         value: selectedSex,
-                        decoration: const InputDecoration(
-                          labelText: 'Sex (الجنس)',
-                          border: OutlineInputBorder(),
-                        ),
                         items: const [
                           DropdownMenuItem(
                               value: 'M', child: Text('Male (ذكر)')),
@@ -1014,13 +1172,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
+                _buildDropdown(
+                  label: 'Subspecialty Category (التصنيف الجراحي)',
                   value: selectedCategory,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Subspecialty Category (التصنيف الجراحي)',
-                    border: OutlineInputBorder(),
-                  ),
                   items: kSurgicalProcedures.keys
                       .map((cat) =>
                           DropdownMenuItem(value: cat, child: Text(cat)))
@@ -1034,13 +1188,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                   },
                 ),
                 const SizedBox(height: 12),
-                DropdownButtonFormField<String>(
+                _buildDropdown(
+                  label: 'Procedure (نوع العملية)',
                   value: selectedProcedure,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Procedure (نوع العملية)',
-                    border: OutlineInputBorder(),
-                  ),
                   items: kSurgicalProcedures[selectedCategory]!
                       .map((p) => DropdownMenuItem(value: p, child: Text(p)))
                       .toList(),
@@ -1061,12 +1211,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                 Row(
                   children: [
                     Expanded(
-                      child: DropdownButtonFormField<String>(
+                      child: _buildDropdown(
+                        label: 'CEPOD Urgency',
                         value: selectedUrgency,
-                        decoration: const InputDecoration(
-                          labelText: 'CEPOD Urgency',
-                          border: OutlineInputBorder(),
-                        ),
                         items: ['Elective', 'Scheduled', 'Urgent', 'Emergency']
                             .map((u) =>
                                 DropdownMenuItem(value: u, child: Text(u)))
@@ -1077,12 +1224,9 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                     ),
                     const SizedBox(width: 10),
                     Expanded(
-                      child: DropdownButtonFormField<String>(
+                      child: _buildDropdown(
+                        label: 'Supervision Role',
                         value: selectedRole,
-                        decoration: const InputDecoration(
-                          labelText: 'Supervision Role',
-                          border: OutlineInputBorder(),
-                        ),
                         items: const [
                           DropdownMenuItem(
                               value: 'P', child: Text('P (Performed)')),
@@ -1173,9 +1317,8 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                       'notes': notesCtrl.text.trim(),
                     };
 
-                    if (isEdit) {
-                      await LogbookDatabase.instance
-                          .updateCase(existingCase['id'] as int, row);
+                    if (editingId != null) {
+                      await LogbookDatabase.instance.updateCase(editingId, row);
                     } else {
                       await LogbookDatabase.instance.insertCase(row);
                     }
@@ -1197,6 +1340,254 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
+  // --- Analytics Dashboard View ---
+  Widget _buildAnalyticsDashboard() {
+    final list = _dateFilteredCases;
+    final total = list.length;
+
+    final pCount = _countByRole('P');
+    final stsCount = _countByRole('S-TS');
+    final stuCount = _countByRole('S-TU');
+    final tCount = _countByRole('T');
+    final aCount = _countByRole('A');
+
+    // Primary Surgeon / Operating roles = P + S-TS + S-TU + T
+    final operatingCount = pCount + stsCount + stuCount + tCount;
+    final independenceRatio = total == 0 ? 0.0 : operatingCount / total;
+    final goalProgress =
+        _targetCasesGoal <= 0 ? 0.0 : (total / _targetCasesGoal).clamp(0.0, 1.0);
+
+    int countUrgency(String u) =>
+        list.where((c) => c['urgency'] == u).length;
+
+    return ListView(
+      padding: const EdgeInsets.all(14),
+      children: [
+        // 1. Target Goal Progress Card
+        Card(
+          color: kCardBg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: kGoldBorder),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'التقدم نحو الهدف التدريبي (Target Goal)',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: kGoldColor,
+                          fontSize: 15),
+                    ),
+                    Text(
+                      '$total / $_targetCasesGoal',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: LinearProgressIndicator(
+                    value: goalProgress,
+                    minHeight: 10,
+                    backgroundColor: Colors.white12,
+                    color: kGoldColor,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'نسبة إنجاز الهدف المحدد: ${(goalProgress * 100).toStringAsFixed(1)}%',
+                  style: const TextStyle(fontSize: 12, color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // 2. Surgical Independence vs Assisted Card
+        Card(
+          color: kCardBg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: kGoldBorder),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'مؤشر الاستقلالية الجراحية (Operating vs Assisted)',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: kGoldColor,
+                      fontSize: 15),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'جراح رئيسي / بإشراف (P, S-TS, S-TU, T): $operatingCount (${(independenceRatio * 100).toStringAsFixed(1)}%)',
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.greenAccent),
+                    ),
+                    Text(
+                      'مساعد (A): $aCount',
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.orangeAccent),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: LinearProgressIndicator(
+                    value: independenceRatio,
+                    minHeight: 10,
+                    backgroundColor: Colors.orangeAccent.withAlpha(70),
+                    color: Colors.greenAccent,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // 3. CEPOD Urgency Distribution
+        Card(
+          color: kCardBg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: kGoldBorder),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'توزيع الحالات حسب درجة الاستعجال (CEPOD)',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: kGoldColor,
+                      fontSize: 15),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _urgencyBox('Elective', countUrgency('Elective')),
+                    _urgencyBox('Scheduled', countUrgency('Scheduled')),
+                    _urgencyBox('Urgent', countUrgency('Urgent')),
+                    _urgencyBox('Emergency', countUrgency('Emergency')),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+
+        // 4. Subspecialty Breakdown
+        Card(
+          color: kCardBg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: kGoldBorder),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'تفصيل العمليات حسب التخصص الجراحي الفرعي',
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: kGoldColor,
+                      fontSize: 15),
+                ),
+                const SizedBox(height: 12),
+                ...kSurgicalProcedures.keys.map((category) {
+                  final catCases =
+                      list.where((c) => c['category'] == category).toList();
+                  final catTotal = catCases.length;
+                  final catOperating =
+                      catCases.where((c) => c['role'] != 'A').length;
+                  final catAssisted =
+                      catCases.where((c) => c['role'] == 'A').length;
+                  final ratio = total == 0 ? 0.0 : catTotal / total;
+
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Expanded(
+                              child: Text(
+                                category,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600, fontSize: 13),
+                              ),
+                            ),
+                            Text(
+                              'المجموع: $catTotal  (منفذ: $catOperating | مساعد: $catAssisted)',
+                              style: const TextStyle(
+                                  fontSize: 11, color: Colors.white70),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 5),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(4),
+                          child: LinearProgressIndicator(
+                            value: ratio,
+                            minHeight: 6,
+                            backgroundColor: Colors.white10,
+                            color: kGoldColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _urgencyBox(String label, int count) {
+    return Column(
+      children: [
+        Text(
+          count.toString(),
+          style: const TextStyle(
+              fontSize: 18, fontWeight: FontWeight.bold, color: kGoldColor),
+        ),
+        const SizedBox(height: 2),
+        Text(label,
+            style: const TextStyle(fontSize: 11, color: Colors.white70)),
+      ],
+    );
+  }
+
   Widget _buildStatChip(String label, int count, String roleKey) {
     final isSelected = _selectedRoleFilter == roleKey;
     return GestureDetector(
@@ -1206,7 +1597,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
         decoration: BoxDecoration(
           color: isSelected ? kGoldColor : kCardBg,
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: kGoldColor.withOpacity(0.5)),
+          border: Border.all(color: kGoldBorder),
         ),
         child: Column(
           children: [
@@ -1231,8 +1622,74 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
     );
   }
 
+  // --- PIN Lock Screen ---
+  Widget _buildLockScreen() {
+    final pinInputCtrl = TextEditingController();
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.lock_outline, size: 64, color: kGoldColor),
+              const SizedBox(height: 16),
+              const Text(
+                'Surgical e-Logbook Locked',
+                style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: kGoldColor),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: pinInputCtrl,
+                obscureText: true,
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                decoration: const InputDecoration(
+                  labelText: 'أدخل رمز القفل (PIN)',
+                  border: OutlineInputBorder(),
+                ),
+                onSubmitted: (val) {
+                  if (val.trim() == _pinCode) {
+                    setState(() => _isLocked = false);
+                  } else {
+                    _showSnack('رمز القفل غير صحيح');
+                  }
+                },
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: kGoldColor,
+                  foregroundColor: Colors.black,
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                ),
+                onPressed: () {
+                  if (pinInputCtrl.text.trim() == _pinCode) {
+                    setState(() => _isLocked = false);
+                  } else {
+                    _showSnack('رمز القفل غير صحيح');
+                  }
+                },
+                child: const Text('فتح السجل الجراحي',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_isLocked) {
+      return _buildLockScreen();
+    }
+
     final hasDateFilter = _screenStartDate != null || _screenEndDate != null;
 
     return Scaffold(
@@ -1269,7 +1726,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
             onSelected: (value) {
               if (value == 'profile') _showProfileDialog();
               if (value == 'export_json') _exportJsonBackup();
-              if (value == 'import_json') _importJsonBackup();
+              if (value == 'import_json') _showRestoreBackupDialog();
               if (value == 'export_csv') _showDateRangeDialog(mode: 'csv');
             },
             itemBuilder: (ctx) => [
@@ -1277,7 +1734,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
                 value: 'profile',
                 child: ListTile(
                   leading: Icon(Icons.badge_outlined, color: kGoldColor),
-                  title: Text('بيانات الطبيب (Profile)'),
+                  title: Text('بيانات الطبيب والهدف وقفل PIN'),
                   contentPadding: EdgeInsets.zero,
                 ),
               ),
@@ -1318,7 +1775,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               margin: const EdgeInsets.only(left: 12, right: 12, top: 10),
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: kGoldColor.withOpacity(0.15),
+                color: kGoldSubtle,
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: kGoldColor),
               ),
@@ -1356,86 +1813,121 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
               ],
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: TextField(
-              onChanged: (val) => setState(() => _searchQuery = val),
-              decoration: InputDecoration(
-                hintText: 'Search procedure, category, or Patient ID...',
-                prefixIcon: const Icon(Icons.search),
-                isDense: true,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
           Expanded(
-            child: _filteredCases.isEmpty
-                ? const Center(
-                    child: Text('No operations found in the selected period.'))
-                : ListView.builder(
-                    padding: const EdgeInsets.all(12),
-                    itemCount: _filteredCases.length,
-                    itemBuilder: (ctx, i) {
-                      final c = _filteredCases[i];
-                      return Card(
-                        color: kCardBg,
-                        margin: const EdgeInsets.only(bottom: 10),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: BorderSide(color: kGoldColor.withOpacity(0.25)),
+            child: _currentTabIndex == 1
+                ? _buildAnalyticsDashboard()
+                : Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: TextField(
+                          onChanged: (val) =>
+                              setState(() => _searchQuery = val),
+                          decoration: InputDecoration(
+                            hintText:
+                                'Search procedure, category, or Patient ID...',
+                            prefixIcon: const Icon(Icons.search),
+                            isDense: true,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
                         ),
-                        child: ListTile(
-                          onTap: () => _showCaseSheet(existingCase: c),
-                          title: Text(
-                            c['procedureName'],
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, color: kGoldColor),
-                          ),
-                          subtitle: Text(
-                            'Date: ${c['date']} | Pt: ${c['patientId']} (${c['age']}${c['sex']}) | CEPOD: ${c['urgency']}\nSupervisor: ${c['consultant']} | Hosp: ${c['hospital']}',
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: kGoldColor.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
+                      ),
+                      const SizedBox(height: 8),
+                      Expanded(
+                        child: _filteredCases.isEmpty
+                            ? const Center(
                                 child: Text(
-                                  c['role'],
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: kGoldColor),
-                                ),
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.delete_outline,
-                                    color: Colors.redAccent),
-                                onPressed: () async {
-                                  await LogbookDatabase.instance
-                                      .deleteCase(c['id'] as int);
-                                  _refreshCases();
+                                    'No operations found in the selected period.'))
+                            : ListView.builder(
+                                padding: const EdgeInsets.all(12),
+                                itemCount: _filteredCases.length,
+                                itemBuilder: (ctx, i) {
+                                  final c = _filteredCases[i];
+                                  return Card(
+                                    color: kCardBg,
+                                    margin: const EdgeInsets.only(bottom: 10),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      side:
+                                          const BorderSide(color: kGoldBorder),
+                                    ),
+                                    child: ListTile(
+                                      onTap: () =>
+                                          _showCaseSheet(existingCase: c),
+                                      title: Text(
+                                        c['procedureName']?.toString() ?? '',
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            color: kGoldColor),
+                                      ),
+                                      subtitle: Text(
+                                        'Date: ${c['date']} | Pt: ${c['patientId']} (${c['age']}${c['sex']}) | CEPOD: ${c['urgency']}\nSupervisor: ${c['consultant']} | Hosp: ${c['hospital']}',
+                                      ),
+                                      trailing: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                                horizontal: 8, vertical: 4),
+                                            decoration: BoxDecoration(
+                                              color: kGoldSubtle,
+                                              borderRadius:
+                                                  BorderRadius.circular(6),
+                                            ),
+                                            child: Text(
+                                              c['role']?.toString() ?? '',
+                                              style: const TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  color: kGoldColor),
+                                            ),
+                                          ),
+                                          IconButton(
+                                            icon: const Icon(
+                                                Icons.delete_outline,
+                                                color: Colors.redAccent),
+                                            onPressed: () async {
+                                              await LogbookDatabase.instance
+                                                  .deleteCase(c['id'] as int);
+                                              _refreshCases();
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
                                 },
                               ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
+                      ),
+                    ],
                   ),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _showCaseSheet(),
-        child: const Icon(Icons.add),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentTabIndex,
+        backgroundColor: kCardBg,
+        selectedItemColor: kGoldColor,
+        unselectedItemColor: Colors.white54,
+        onTap: (idx) => setState(() => _currentTabIndex = idx),
+        items: const [
+          BottomNavigationBarItem(
+            icon: Icon(Icons.list_alt),
+            label: 'Operations Log (السجل)',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.analytics_outlined),
+            label: 'Analytics (الإحصائيات)',
+          ),
+        ],
       ),
+      floatingActionButton: _currentTabIndex == 0
+          ? FloatingActionButton(
+              onPressed: () => _showCaseSheet(),
+              child: const Icon(Icons.add),
+            )
+          : null,
     );
   }
 }
