@@ -23,27 +23,24 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Build Pure Flutter Environment & Configure Project
+      - name: Build Pure Flutter Environment
         run: |
-          # إنشاء مشروع فلاتر جديد ونظيف تماماً
+          # إنشاء مشروع فلاتر جديد ونظيف تماماً بدون أي مكتبات خارجية
           flutter create --project-name surgical_elogbook --org com.surgeon.elogbook app_workspace
           
-          # نسخ كود التطبيق
+          # نسخ كود التطبيق الصافي فقط
           if [ -f "main.dart" ]; then
             cp main.dart app_workspace/lib/main.dart
           elif [ -f "lib/main.dart" ]; then
             cp lib/main.dart app_workspace/lib/main.dart
+          else
+            echo "Error: main.dart not found!"
+            exit 1
           fi
 
-          # نسخ ملف pubspec.yaml لضمان عمل المشروع بشكل صحيح
-          if [ -f "pubspec.yaml" ]; then
-            cp pubspec.yaml app_workspace/pubspec.yaml
-          fi
-
-      - name: Get Dependencies & Build Release APK
+      - name: Build Release APK
         run: |
           cd app_workspace
-          flutter pub get
           flutter build apk --release
 
       - name: Upload APK Artifact
