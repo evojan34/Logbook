@@ -25,22 +25,26 @@ jobs:
 
       - name: Build Pure Flutter Environment
         run: |
-          # إنشاء مشروع فلاتر جديد ونظيف تماماً بدون أي مكتبات خارجية
+          # إنشاء مشروع فلاتر جديد ونظيف
           flutter create --project-name surgical_elogbook --org com.surgeon.elogbook app_workspace
           
-          # نسخ كود التطبيق الصافي فقط
-          if [ -f "main.dart" ]; then
-            cp main.dart app_workspace/lib/main.dart
-          elif [ -f "lib/main.dart" ]; then
+          # مسح ملف main.dart الافتراضي من المشروع الجديد
+          rm -f app_workspace/lib/main.dart
+          
+          # جلب الكود الخاص بك من المستودع (سواء كان في مجلد lib أو خارجه)
+          if [ -f "lib/main.dart" ]; then
             cp lib/main.dart app_workspace/lib/main.dart
+          elif [ -f "main.dart" ]; then
+            cp main.dart app_workspace/lib/main.dart
           else
-            echo "Error: main.dart not found!"
+            echo "Error: main.dart not found in your repository!"
             exit 1
           fi
 
       - name: Build Release APK
         run: |
           cd app_workspace
+          # بناء التطبيق مباشرة بدون الحاجة لملف pubspec.yaml القديم الخاص بك
           flutter build apk --release
 
       - name: Upload APK Artifact
