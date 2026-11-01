@@ -122,7 +122,7 @@ class LogbookDatabase {
     final int nextId = (db['nextId'] as int? ?? 1);
     final newRow = Map<String, dynamic>.from(row);
     newRow['id'] = nextId;
-    (db['operations'] as List).add(newRow);
+    (db['operations'] as List<dynamic>).add(newRow);
     db['nextId'] = nextId + 1;
     await _saveDb();
     return nextId;
@@ -130,7 +130,7 @@ class LogbookDatabase {
 
   Future<void> updateCase(int id, Map<String, dynamic> row) async {
     final db = await _loadDb();
-    final List ops = db['operations'] as List;
+    final List<dynamic> ops = db['operations'] as List<dynamic>;
     for (int i = 0; i < ops.length; i++) {
       final item = Map<String, dynamic>.from(ops[i] as Map);
       if (item['id'] == id) {
@@ -145,7 +145,7 @@ class LogbookDatabase {
 
   Future<List>> fetchAllCases() async {
     final db = await _loadDb();
-    final List ops = db['operations'] as List;
+    final List<dynamic> ops = db['operations'] as List<dynamic>;
     final List> result =
         ops.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     result.sort((a, b) {
@@ -158,7 +158,7 @@ class LogbookDatabase {
 
   Future<void> deleteCase(int id) async {
     final db = await _loadDb();
-    final List ops = db['operations'] as List;
+    final List<dynamic> ops = db['operations'] as List<dynamic>;
     ops.removeWhere((e) => (e as Map)['id'] == id);
     await _saveDb();
   }
@@ -174,7 +174,7 @@ class LogbookDatabase {
 
   Future> loadSettings() async {
     final db = await _loadDb();
-    final Map s = db['settings'] as Map;
+    final Map<String, dynamic> s = Map<String, dynamic>.from(db['settings'] as Map);
     final Map<String, String> result = {};
     for (final entry in s.entries) {
       result[entry.key.toString()] = entry.value.toString();
@@ -890,7 +890,7 @@ class _LogbookHomeScreenState extends State<LogbookHomeScreen> {
 
       int importedCount = 0;
       if (data['operations'] != null && data['operations'] is List) {
-        final List ops = data['operations'];
+        final List<dynamic> ops = data['operations'];
         final existing = await LogbookDatabase.instance.fetchAllCases();
 
         for (final item in ops) {
@@ -2276,6 +2276,7 @@ class ConsolidationReportScreen extends StatelessWidget {
               const SizedBox(height: 36),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                transformAlignment: Alignment.center,
                 children: [
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
